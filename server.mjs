@@ -442,7 +442,7 @@ function getServer() {
       if (Date.now() - lastDraft < 60_000) throw new Error("Draft limit: retry in one minute");
       draftTimes.set(family, Date.now());
       const subject = `https://www.dkgswarm.com/ka/${encodeURIComponent(slug)}`;
-      const lit = (value) => `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+      const lit = (value) => JSON.stringify(String(value ?? ""));
       const created = await dkgFetch("/api/knowledge-assets", {
         method: "POST",
         body: {

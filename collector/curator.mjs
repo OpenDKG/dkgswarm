@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-const graph = "trac-marketing";
+const graph = process.env.DKG_PUBLIC_GRAPH_ID || "trac-marketing";
 const watcherDb = () => new DatabaseSync(process.env.WATCH_DB || "/root/dkg-swarm-webhooks/data/watcher.sqlite", { readOnly: true });
 const api = (process.env.DKG_API_URL || "http://127.0.0.1:9200").replace(/\/$/, "");
 const token = process.argv[1]?.endsWith("curator.mjs") ? (fs.readFileSync(process.env.DKG_API_TOKEN_FILE || "/root/.dkg/auth.token", "utf8")
@@ -250,10 +250,10 @@ async function main() {
       quad(subject, `${ns}sourceTier`, lit(isPush ? "authenticated-writer-directive" : "community-unverified")),
       quad(subject, `${ns}observedAt`, lit(new Date().toISOString())),
       quad(subject, `${ns}claimStatus`, lit(isPush ? "coordination request; claims require independent verification" : "community-submitted; not independently verified")),
-      quad(subject, "https://schema.org/identifier", lit(postId)),
-      quad(subject, "https://schema.org/dateCreated", lit(issuedAt)),
-      quad(subject, "https://schema.org/expires", lit(expiresAt)),
-      quad(subject, `${ns}proposedAngle`, lit(angle)),
+      ...(postId ? [quad(subject, "https://schema.org/identifier", lit(postId))] : []),
+      ...(issuedAt ? [quad(subject, "https://schema.org/dateCreated", lit(issuedAt))] : []),
+      ...(expiresAt ? [quad(subject, "https://schema.org/expires", lit(expiresAt))] : []),
+      ...(angle ? [quad(subject, `${ns}proposedAngle`, lit(angle))] : []),
       quad(subject, `${ns}derivedFrom`, `https://www.dkgswarm.com/ka/${id}`),
     ] });
     let shared;

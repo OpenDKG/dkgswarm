@@ -44,7 +44,7 @@ const FEATURES = {
 };
 
 const now = () => new Date().toISOString();
-const lit = (value) => `"${String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r?\n/g, "\\n")}"`;
+const lit = (value) => JSON.stringify(String(value ?? ""));
 const typed = (value, type) => `${lit(value)}^^<${XSD}${type}>`;
 export function normalizeXHandle(value, withAt = false) {
   const handle = String(value || "").trim().replace(/^@/, "");
@@ -168,12 +168,27 @@ function loadToken() {
   }
 }
 
+const UNSAFE_IRI_CHARS_RE = /[<>"\\{}|^`\s\u0000-\u001f\u007f]/;
+
+function sanitizeExtractedUrl(raw) {
+  const trimmed = String(raw || "").replace(/[.,);!?]+$/, "");
+  if (!trimmed || UNSAFE_IRI_CHARS_RE.test(trimmed)) return "";
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
+    const normalized = parsed.toString();
+    return UNSAFE_IRI_CHARS_RE.test(normalized) ? "" : normalized;
+  } catch {
+    return "";
+  }
+}
+
 function relationships(text) {
   const value = String(text || "");
   return {
     mentions: [...new Set([...value.matchAll(/(^|[^\w])@([A-Za-z0-9_]{1,15})/g)].map((match) => `@${match[2]}`))],
     hashtags: [...new Set([...value.matchAll(/(^|[^\w])#([\p{L}\p{N}_]+)/gu)].map((match) => `#${match[2]}`))],
-    links: [...new Set(value.match(/https?:\/\/[^\s<>]+/g) || [])],
+    links: [...new Set((value.match(/https?:\/\/[^\s<>"\\{}|^`\u0000-\u001f\u007f]+/g) || []).map(sanitizeExtractedUrl).filter(Boolean))],
   };
 }
 

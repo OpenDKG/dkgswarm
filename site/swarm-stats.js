@@ -40,8 +40,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       const target = strip.querySelector(`[data-stat="${name}"]`);
       if (target && Number.isFinite(value)) target.textContent = value.toLocaleString();
     }
-    strip.querySelector('[data-stat-note]').remove();
+    strip.querySelector('[data-stat-note]')?.remove();
   } catch {
-    strip.querySelector('[data-stat-note]').textContent = 'Activity temporarily unavailable';
+    const note = strip.querySelector('[data-stat-note]');
+    if (note) note.textContent = 'Activity temporarily unavailable';
   }
 });
