@@ -3,7 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { isCollectivePush } from "./collector/curator.mjs";
+import { isCollectivePush, pushQueueExpired } from "./collector/curator.mjs";
 
 const execute = promisify(execFile);
 
@@ -49,17 +49,30 @@ export async function routeDraft(name, { enqueue = enqueueCuratorDraft, deliver 
   }
 }
 
-export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = deliverCollectivePush } = {}) {
+/** Safety cap in addition to the expiry window; a push older than its lifetime is never retried. */
+export const MAX_PUSH_DELIVERY_ATTEMPTS = 150;
+
+export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = deliverCollectivePush, at = Date.now() } = {}) {
   if (!fs.existsSync(filename)) return;
   const db = new DatabaseSync(filename);
   let names;
   try {
     db.exec("PRAGMA busy_timeout = 5000");
-    if (!db.prepare("PRAGMA table_info(drafts)").all().some((column) => column.name === "delivery_attempt_at")) db.exec("ALTER TABLE drafts ADD COLUMN delivery_attempt_at TEXT");
-    names = db.prepare("SELECT name FROM drafts WHERE reviewed_at IS NULL ORDER BY COALESCE(delivery_attempt_at, ''), queued_at").all()
-      .filter((row) => isCollectivePush(row.name)).slice(0, 10);
-    const attempted = db.prepare("UPDATE drafts SET delivery_attempt_at = ? WHERE name = ?");
-    for (const { name } of names) attempted.run(new Date().toISOString(), name);
+    const columns = db.prepare("PRAGMA table_info(drafts)").all().map((column) => column.name);
+    if (!columns.includes("delivery_attempt_at")) db.exec("ALTER TABLE drafts ADD COLUMN delivery_attempt_at TEXT");
+    if (!columns.includes("delivery_attempts")) db.exec("ALTER TABLE drafts ADD COLUMN delivery_attempts INTEGER NOT NULL DEFAULT 0");
+    const pending = db.prepare("SELECT name, queued_at, delivery_attempts FROM drafts WHERE reviewed_at IS NULL ORDER BY COALESCE(delivery_attempt_at, ''), queued_at").all()
+      .filter((row) => isCollectivePush(row.name));
+    // Expired or exhausted pushes become terminal here and are never retried again.
+    const retire = db.prepare("UPDATE drafts SET reviewed_at = ? WHERE name = ? AND reviewed_at IS NULL");
+    const live = [];
+    for (const row of pending) {
+      if (pushQueueExpired(row, at) || row.delivery_attempts >= MAX_PUSH_DELIVERY_ATTEMPTS) retire.run(new Date(at).toISOString(), row.name);
+      else live.push(row);
+    }
+    names = live.slice(0, 10);
+    const attempted = db.prepare("UPDATE drafts SET delivery_attempt_at = ?, delivery_attempts = delivery_attempts + 1 WHERE name = ?");
+    for (const { name } of names) attempted.run(new Date(at).toISOString(), name);
   } finally { db.close(); }
   for (const { name } of names) {
     try { await deliver(name); } catch {}

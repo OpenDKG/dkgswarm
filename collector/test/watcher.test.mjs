@@ -294,6 +294,7 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
   const oldId = "123456789012345677";
   const requests = [];
   const written = new Set();
+  const writtenQuads = new Map();
   const shared = new Set();
   const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, headers: new Headers() });
   const result = (id, createdAt, authorId = "42") => ({ id, text: "New update", created_at: createdAt, author_id: authorId });
@@ -317,6 +318,7 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
       const name = JSON.parse(options.body).name;
       requests.push(name);
       written.add(name);
+      writtenQuads.set(name, JSON.parse(options.body).quads);
       return json({ memoryLayer: "WM" });
     }
     if (url.includes("/swm/share")) {
@@ -334,6 +336,12 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
     if (url.endsWith("/api/query")) {
       const body = JSON.parse(options.body);
        assert.doesNotMatch(body.sparql, /GRAPH\s*</);
+       const pushSubject = body.sparql.match(/<https:\/\/www\.dkgswarm\.com\/ka\/(collective-push-x-\d+)> rdf:type/)?.[1];
+       if (pushSubject && body.sparql.startsWith("PREFIX rdf:")) {
+         // Exact-content check before sharing: return what the watcher wrote for this push.
+         const quads = written.has(pushSubject) ? writtenQuads.get(pushSubject) : [];
+         return json({ result: { type: "bindings", bindings: quads.map(({ subject, predicate, object }) => ({ s: subject, p: predicate, o: object })) } });
+       }
        const id = body.sparql.match(/(?:classification\/|status\/)(\d+)|collective-push-x-(\d+)/)?.slice(1).find(Boolean);
        const name = body.sparql.includes("SocialMediaPosting") ? `raw-x-post-${id}`
          : body.sparql.includes("Classification") ? `x-insight-${id}` : `collective-push-x-${id}`;

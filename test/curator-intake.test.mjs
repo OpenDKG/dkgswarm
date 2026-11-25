@@ -85,6 +85,28 @@ test("retry rotates failed pushes so older errors cannot starve later delivery",
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("expired collective pushes leave the retry queue without another delivery attempt", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-expired-retry-"));
+  const filename = path.join(dir, "intake.sqlite");
+  try {
+    enqueueCuratorDraft("collective-push-stale", { filename });
+    enqueueCuratorDraft("collective-push-fresh", { filename });
+    const db = new DatabaseSync(filename);
+    db.prepare("UPDATE drafts SET queued_at = ? WHERE name = ?").run(new Date(Date.now() - 3 * 3600000).toISOString(), "collective-push-stale");
+    db.close();
+    const delivered = [];
+    const deliver = async (name) => { delivered.push(name); throw new Error("temporary"); };
+    await retryCollectivePushes({ filename, deliver });
+    await retryCollectivePushes({ filename, deliver });
+    assert.deepEqual(delivered, ["collective-push-fresh", "collective-push-fresh"]);
+    const check = new DatabaseSync(filename);
+    try {
+      assert.ok(check.prepare("SELECT reviewed_at FROM drafts WHERE name = ?").get("collective-push-stale").reviewed_at);
+      assert.equal(check.prepare("SELECT reviewed_at FROM drafts WHERE name = ?").get("collective-push-fresh").reviewed_at, null);
+    } finally { check.close(); }
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("server retains writer, policy and validation gates before draft creation", () => {
   const source = fs.readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
   const handler = source.slice(source.indexOf("async ({ name, text, sourceUrl"), source.indexOf('"share_to_swm"'));

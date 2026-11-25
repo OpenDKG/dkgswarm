@@ -686,6 +686,11 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
      let expected;
      try { expected = buildAssets(data.post, data.classification, data.observedAt)[stage === "raw-dkg" ? "raw" : "derived"].quads; }
      catch { return false; }
+     return expectedQuadsMatch(expected, ["working-memory", "shared-working-memory"]);
+   }
+
+   /** true when a view holds exactly `expected` for its subjects, false when not, null when unverifiable. */
+   async function expectedQuadsMatch(expected, views) {
       // Full rdf:type IRI inside VALUES is rejected by the scoped-query rewriter
       // ("unable to locate a graph-scopable WHERE block"). Prefixed rdf:type is accepted.
       const pairs = [...new Set(expected.map(({ subject, predicate }) =>
@@ -694,7 +699,7 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
       const token = loadToken();
        if (!token) return null;
        let unavailable = false;
-      for (const view of ["working-memory", "shared-working-memory"]) {
+      for (const view of views) {
         try {
           const response = await fetch(`${dkgApi}/api/query`, {
             method: "POST",
@@ -801,6 +806,10 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
     const token = loadToken();
     if (!token) throw new Error("no dkg token");
     if (!trustedPushEligible(post)) return;
+    // Never share a Working Memory subject by name alone: it must hold exactly the watcher-authored quads.
+    if (await expectedQuadsMatch(push.quads, ["working-memory"]) !== true) {
+      throw new Error(`collective push ${push.name} WM content is not the watcher-authored draft; not sharing`);
+    }
     const response = await fetch(`${dkgApi}/api/knowledge-assets/${push.name}/swm/share`, {
       method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ contextGraphId: graphId }), signal: AbortSignal.timeout(20000),
