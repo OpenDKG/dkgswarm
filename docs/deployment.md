@@ -266,7 +266,17 @@ DKG_MCP_POLICY_CURRENT=/srv/dkg/policy-current.json \
 node server.mjs
 ```
 
-Put an HTTPS reverse proxy in front and preserve the public `Host` header. Set
+Put an HTTPS reverse proxy in front and preserve the public `Host` header. For the static
+`site/`, also send these response headers (pages carry the same CSP as a `<meta>` fallback, but
+`frame-ancestors` only works as a header):
+
+```
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+Referrer-Policy: strict-origin-when-cross-origin
+```
+
+All site scripts are same-origin files; there are no inline scripts and no third-party script hosts. Set
 `DKG_MCP_PUBLIC_URL` to the exact public origin so PRM, issuer, and audience match. Add the
 callback hosts your clients use to `DKG_MCP_OAUTH_REDIRECT_HOSTS` and their browser origins
 to `DKG_MCP_CORS_ORIGINS`; both refuse anything not listed.

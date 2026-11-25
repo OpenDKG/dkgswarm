@@ -38,3 +38,8 @@ PERFORMANCE OF THIS SOFTWARE.
 ISC permits use, copy, modification, and distribution with or without fee when the applicable copyright and permission notices are preserved. Because the merged revision recorded no separate contributor copyright notice, this file preserves the permission notice and records the observed attribution rather than asserting one. No fresh contributor consent is asserted here, and no claim is made that the owner's MIT license relicenses this contribution.
 
 Bundled third-party names, logos, and media entered the initial public-source commit without per-file notices. They remain subject to their own terms and are not relicensed by this file or by the root MIT license.
+
+## particles.js 2.0.0 (MIT)
+
+`site/vendor/particles-2.0.0.min.js` is an unmodified copy of particles.js 2.0.0 by Vincent Garreau (https://github.com/VincentGarreau/particles.js), MIT license; its license header is kept in the file. It is served from this site instead of a third-party CDN and is not loaded on the donation page.
+
