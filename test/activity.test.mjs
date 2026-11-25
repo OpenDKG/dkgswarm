@@ -94,3 +94,51 @@ test("real MCP dispatch tracks success, returned errors, thrown errors and input
     }
   } finally { await client.close(); await server.close(); }
 });
+
+test("records do not invalidate the snapshot: N records + M snapshots in the TTL aggregate once", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "swarm-activity-"));
+  let aggregates = 0;
+  const activity = createActivity(path.join(dir, "activity.sqlite"), { onAggregate: () => { aggregates += 1; } });
+  try {
+    const at = Date.now();
+    activity.snapshot(at);
+    for (let i = 0; i < 50; i++) {
+      activity.record({ family: `agent-${i}`, tool: "graph_info", graph: "trac-marketing", ok: true, at: at + i });
+      activity.snapshot(at + i);
+    }
+    assert.equal(aggregates, 1);
+    activity.snapshot(at + 61000);
+    assert.equal(aggregates, 2);
+  } finally {
+    activity.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("old rows roll up into daily aggregates without changing totals, and only multi-day data users count as active", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "swarm-activity-"));
+  const file = path.join(dir, "activity.sqlite");
+  const activity = createActivity(file);
+  try {
+    const at = Date.now();
+    const day = 24 * 3600000;
+    for (let i = 0; i < 20; i++) activity.record({ family: "steady", tool: "query_graph", graph: "g", ok: true, at: at - 30 * day + i });
+    activity.record({ family: "steady", tool: "search_graph", graph: "g", ok: true, at });
+    for (let i = 0; i < 25; i++) activity.record({ family: `drive-by-${i}`, tool: "graph_info", graph: "g", ok: true, at });
+    activity.record({ family: "one-day", tool: "query_graph", graph: "g", ok: true, at });
+    const snapshot = activity.snapshot(at);
+    assert.equal(snapshot.toolCalls, 47);
+    assert.equal(snapshot.queries, 22);
+    assert.equal(snapshot.connectedInstallations, 27);
+    assert.equal(snapshot.qualifiedInstallations, 1);
+    assert.equal(snapshot.windows.last7Days.toolCalls, 27);
+    const raw = new DatabaseSync(file, { readOnly: true });
+    try {
+      assert.equal(raw.prepare("SELECT COUNT(*) AS n FROM activity WHERE at < ?").get(at - 8 * day).n, 0);
+      assert.equal(raw.prepare("SELECT SUM(calls) AS n FROM activity_daily").get().n, 20);
+    } finally { raw.close(); }
+  } finally {
+    activity.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

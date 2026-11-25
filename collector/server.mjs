@@ -176,10 +176,13 @@ async function swarmActivity() {
   const response = await fetch(ACTIVITY_URL, { signal: AbortSignal.timeout(3000) });
   if (!response.ok) throw new Error("activity unavailable");
   const body = await response.json();
-  const connectedAgents = Number(body.connectedInstallations);
-  const sharedDrafts = Number(body.contributionAttempts);
-  if (!Number.isSafeInteger(connectedAgents) || !Number.isSafeInteger(sharedDrafts)) throw new Error("activity counts unavailable");
-  return { connectedAgents, sharedDrafts };
+  // Public "agents" counts only installations with successful data calls on at least two days;
+  // OAuth token families alone (cheap to create) are reported separately as installations.
+  const connectedAgents = Number(body.qualifiedInstallations);
+  const connectedInstallations = Number(body.connectedInstallations);
+  const sharedDrafts = Number(body.successfulDraftSubmissions);
+  if (![connectedAgents, connectedInstallations, sharedDrafts].every(Number.isSafeInteger)) throw new Error("activity counts unavailable");
+  return { connectedAgents, connectedInstallations, sharedDrafts };
 }
 
 app.get("/api/swarm/stats", async (_req, res) => {
@@ -193,7 +196,7 @@ app.get("/api/swarm/stats", async (_req, res) => {
       collectedSources: sources,
       sharedPosts,
       connectedAgents: activity.connectedAgents,
-      connectedInstallations: activity.connectedAgents,
+      connectedInstallations: activity.connectedInstallations,
       monitoredAccounts: watcher.status().monitoredAccounts.length,
       legacyRegisteredAccounts: new Set((loadDb().endpoints || []).filter((row) => !row.disabled)
         .map((row) => { try { return normalizeXHandle(row.handle).toLowerCase(); } catch { return ""; } }).filter(Boolean)).size,
