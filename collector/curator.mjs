@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import { kaPrefix } from "../public-url.mjs";
 import { DatabaseSync } from "node:sqlite";
+
+// Same prefix as the MCP server (DKG_MCP_PUBLIC_URL) so self-hosted graphs index consistently.
+const KA_PREFIX = kaPrefix();
 
 const graph = "trac-marketing";
 const watcherDb = () => new DatabaseSync(process.env.WATCH_DB || "/root/dkg-swarm-webhooks/data/watcher.sqlite", { readOnly: true });
@@ -127,7 +131,7 @@ export function xPostQuads(row) {
   if (!row || String(row.summary || "").length < 40 || !row.account || !Number.isFinite(Date.parse(row.created_at))) throw new Error("insufficient source evidence");
   if (canonicalUrl(row.post_url) !== `https://x.com/i/status/${row.post_id}`) throw new Error("source URL does not match post ID");
   const name = `curator-x-post-${row.post_id}`;
-  const subject = `https://www.dkgswarm.com/ka/${name}`;
+  const subject = `${KA_PREFIX}${name}`;
   const sourceTier = JSON.parse(row.classification_json || "{}").sourceTier || "discovery";
   const published = new Date(Date.parse(row.created_at)).toISOString();
   return {
@@ -206,7 +210,7 @@ async function main() {
     const queued = intake(id);
     if (!queued) throw new Error("draft not in authenticated MCP review queue");
     const result = await request("/api/query", { contextGraphId: graph, view: "working-memory",
-      sparql: `SELECT ?p ?o WHERE { <https://www.dkgswarm.com/ka/${id}> ?p ?o } LIMIT 100` });
+      sparql: `SELECT ?p ?o WHERE { <${KA_PREFIX}${id}> ?p ?o } LIMIT 100` });
     const bindings = result?.result?.bindings || result?.bindings;
     if (!Array.isArray(bindings) || bindings.length >= 100) throw new Error("incomplete WM draft read");
     const source = bindings.find((item) => (item.p?.value || item.p) === "https://schema.org/url");
@@ -223,15 +227,15 @@ async function main() {
     const angle = field(`${ns}proposedAngle`);
     const text = term(comment?.o) || "";
     const isPush = isCollectivePush(id);
-    const draftSubject = `https://www.dkgswarm.com/ka/${id}`;
+    const draftSubject = `${KA_PREFIX}${id}`;
     if (!isPush && (!url || !publisher || typeof text !== "string" || text.length < 40 || competingDrafts(duplicates, draftSubject).length)) throw new Error("community source, publisher, substantive text and unique URL required");
     const canonical = isPush ? validateCollectivePush({ name: id, url, postId, issuedAt, expiresAt, publisher: term(publisher?.o), angle, text }) : canonicalUrl(url);
     if (!isPush && !/^https:\/\/x\.com\/i\/status\/\d+$/.test(canonical)) throw new Error("community post requires X post URL");
     const name = `${isPush ? "curator-push-" : "curator-"}${id.toLowerCase()}`.slice(0, 80);
-    const subject = `https://www.dkgswarm.com/ka/${name}`;
+    const subject = `${KA_PREFIX}${name}`;
     const current = await duplicateInventory(canonical);
     if (!isPush && current.some((item) => item.view === "shared-working-memory")) throw new Error("duplicate appeared during review");
-    if (!isPush && current.some((item) => item.view === "working-memory" && ![subject, `https://www.dkgswarm.com/ka/${id}`].includes(item.s?.value || item.s))) throw new Error("competing WM draft; review before promotion");
+    if (!isPush && current.some((item) => item.view === "working-memory" && ![subject, `${KA_PREFIX}${id}`].includes(item.s?.value || item.s))) throw new Error("competing WM draft; review before promotion");
     const sharedPush = async () => askTrue(await request("/api/query", { contextGraphId: graph, view: "shared-working-memory", sparql: `ASK { <${subject}> <${ns}targetPost> <${canonical}> }` }));
     const alreadyShared = isPush && await sharedPush();
     if (alreadyShared) {
@@ -254,7 +258,7 @@ async function main() {
       quad(subject, "https://schema.org/dateCreated", lit(issuedAt)),
       quad(subject, "https://schema.org/expires", lit(expiresAt)),
       quad(subject, `${ns}proposedAngle`, lit(angle)),
-      quad(subject, `${ns}derivedFrom`, `https://www.dkgswarm.com/ka/${id}`),
+      quad(subject, `${ns}derivedFrom`, `${KA_PREFIX}${id}`),
     ] });
     let shared;
     try { shared = await request(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: graph }); }

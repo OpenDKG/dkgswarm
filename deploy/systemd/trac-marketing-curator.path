@@ -1,0 +1,10 @@
+[Unit]
+# Example only. Starts the curator when the public MCP touches TRAC_CURATOR_TRIGGER_FILE.
+Description=Start TRAC marketing curator review on new MCP drafts
+
+[Path]
+PathModified=/var/lib/dkg/curator.trigger
+Unit=trac-marketing-curator.service
+
+[Install]
+WantedBy=multi-user.target

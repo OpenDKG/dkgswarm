@@ -276,6 +276,19 @@ collective-push delivery also need a writer codes file, the curator script
 (`TRAC_CURATOR_SCRIPT`), its intake database (`TRAC_CURATOR_INTAKE`), and `/usr/bin/flock`.
 Without those, keep the deployment reader-only rather than advertising write support.
 
+`DKG_MCP_PUBLIC_URL` also sets the knowledge-asset prefix (`<PUBLIC_URL>/ka/`) used for new
+drafts, the query guard, the public memory feed, collective pushes and the curator, so a
+self-hosted graph is written and read under its own origin. Under an unprivileged service
+account, point `TRAC_CURATOR_LOCK` at a writable lock path and set `TRAC_CURATOR_TRIGGER_FILE`:
+the MCP then touches that file (watched by `trac-marketing-curator.path`) instead of calling
+`systemctl start`, which `NoNewPrivileges=true` forbids.
+
+Abuse limits: `/authorize` and `/api/swarm/memory` are rate limited per client IP and globally
+(429), `get_swarm_policy` shares the per-connection query budget, writer-code attempts are
+limited per connection, and `DKG_MCP_OAUTH_MAX_CLIENTS` (default 1000) caps dynamic client
+registrations. OAuth codes and tokens are stored only as SHA-256 hashes; an existing store is
+re-keyed on first load.
+
 ## Example systemd units
 
 [`deploy/systemd/`](../deploy/systemd/) contains example units for the MCP, collector, daily

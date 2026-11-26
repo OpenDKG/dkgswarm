@@ -1,4 +1,6 @@
-const BASE = "https://www.dkgswarm.com/ka/";
+import { kaPrefix } from "./public-url.mjs";
+
+const BASE = kaPrefix();
 const NS = "https://www.dkgswarm.com/ontology/curator/";
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const PREDICATES = [

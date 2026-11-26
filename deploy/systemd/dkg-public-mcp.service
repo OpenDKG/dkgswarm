@@ -10,6 +10,15 @@ User=dkg
 Group=dkg
 WorkingDirectory=/srv/dkg/public-mcp
 EnvironmentFile=/etc/dkg/public-mcp.env
+# State lives under /var/lib/dkg (writable below); override any of these in the env file.
+Environment=DKG_MCP_OAUTH_STORE=/var/lib/dkg/public-mcp/oauth.json
+Environment=DKG_MCP_WRITER_CODES=/var/lib/dkg/public-mcp/writer-codes.json
+Environment=DKG_MCP_POLICY_CURRENT=/var/lib/dkg/public-mcp/policy-current.json
+Environment=TRAC_CURATOR_INTAKE=/var/lib/dkg/curator-intake.sqlite
+Environment=TRAC_CURATOR_SCRIPT=/srv/dkg/webhooks/curator.mjs
+Environment=TRAC_CURATOR_LOCK=/run/lock/trac-marketing-curator.lock
+# NoNewPrivileges blocks `systemctl start`; trac-marketing-curator.path watches this file.
+Environment=TRAC_CURATOR_TRIGGER_FILE=/var/lib/dkg/curator.trigger
 ExecStart=/usr/bin/node /srv/dkg/public-mcp/server.mjs
 Restart=on-failure
 RestartSec=3
@@ -18,7 +27,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/dkg
+ReadWritePaths=/var/lib/dkg /run/lock
 
 [Install]
 WantedBy=multi-user.target

@@ -66,8 +66,10 @@ export function postingContextMetaQuery(subjects) {
   return `SELECT ?s ?p ?o WHERE { VALUES ?s { ${subjects.map((subject) => `<${subject}>`).join(" ")} } ?s ?p ?o . FILTER(?p IN (${META_PREDICATES.map((predicate) => `<${predicate}>`).join(", ")})) } LIMIT ${subjects.length * META_PREDICATES.length}`;
 }
 
-function tokens(value) {
-  return [...new Set(String(value || "").toLowerCase().match(/[a-z0-9$][a-z0-9$_-]{2,}/g) || [])];
+// Topic matching ignores very short words; `avoid` terms are explicit, so 2-char ones (ai, x2) count.
+function tokens(value, minLength = 3) {
+  const pattern = new RegExp(`[a-z0-9$][a-z0-9$_-]{${Math.max(0, minLength - 1)},}`, "g");
+  return [...new Set(String(value || "").toLowerCase().match(pattern) || [])];
 }
 
 function overlap(topic, text) {
@@ -147,7 +149,7 @@ export function rankPostingContext({ topic, action, targetUrl, audience, focus, 
     const topicScore = overlap(topic, body);
     const audienceScore = audience && overlap(audience, body) > 0 ? 4 : 0;
     const focusScore = focus ? overlap(focus, body) * 40 : 0;
-    const avoided = avoid && tokens(avoid).some((word) => tokens(body).includes(word));
+    const avoided = avoid && tokens(avoid, 2).some((word) => tokens(body, 2).includes(word));
     const targetScore = target && (url === target || body.includes(target)) ? 12 : 0;
     if (avoided && !targetScore) continue;
     const fresh = Number.isFinite(publishedMs) && publishedMs >= cutoff;

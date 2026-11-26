@@ -1,9 +1,16 @@
-export function assertReadSparql(sparql) {
+import { escapeRegExp, kaPrefix } from "./public-url.mjs";
+
+export function assertReadSparql(sparql, { prefix = kaPrefix() } = {}) {
   const s = String(sparql || "").trim();
   if (!s || s.length > 4096) throw new Error("SPARQL missing or exceeds 4096 characters");
   // Small explicit subset: one triple, fixed predicate, no joins, paths,
   // aggregates, functions, aliases, graph clauses, or arbitrary expressions.
-  const pattern = /^(SELECT\s+(?:\?[A-Za-z][\w]*\s+){1,3}WHERE\s*\{|ASK\s*\{)\s*(\?[A-Za-z][\w]*|<https:\/\/www\.dkgswarm\.com\/ka\/[a-zA-Z0-9._-]+>)\s+<(https?:\/\/[^<>\s]+)>\s+(\?[A-Za-z][\w]*|<https?:\/\/[^<>\s]+>)\s*\.?\s*\}\s*(?:LIMIT\s+(\d{1,3})(?:\s+OFFSET\s+(\d{1,5}))?)?$/i;
+  const pattern = new RegExp(
+    String.raw`^(SELECT\s+(?:\?[A-Za-z][\w]*\s+){1,3}WHERE\s*\{|ASK\s*\{)\s*(\?[A-Za-z][\w]*|<` +
+      escapeRegExp(prefix) +
+      String.raw`[a-zA-Z0-9._-]+>)\s+<(https?:\/\/[^<>\s]+)>\s+(\?[A-Za-z][\w]*|<https?:\/\/[^<>\s]+>)\s*\.?\s*\}\s*(?:LIMIT\s+(\d{1,3})(?:\s+OFFSET\s+(\d{1,5}))?)?$`,
+    "i",
+  );
   const match = pattern.exec(s);
   if (!match) throw new Error("Only a single bounded triple-pattern SELECT or ASK is allowed");
   const select = /^SELECT/i.test(match[1]);

@@ -25,6 +25,9 @@ import { normalizeDraftName, isCollectivePush, validateCollectivePush } from "./
 import { createActivity, trackToolOutcome } from "./activity.mjs";
 import { verifyPolicyBindings } from "./policy-integrity.mjs";
 import { assertReadSparql } from "./query-guard.mjs";
+import { withFileLock } from "./file-lock.mjs";
+import { kaPrefix, publicUrl } from "./public-url.mjs";
+import { createWindowLimiter, limitRequests } from "./rate-limit.mjs";
 import { pushSubjectQuery, pushMetadataQuery, parsePushPage, pushBindings, collectivePushPageSize } from "./collective-pushes.mjs";
 import { postingContextSearchQuery, postingContextMetaQuery, rankPostingContext, sanitizeTopic } from "./posting-context.mjs";
 import {
@@ -43,20 +46,24 @@ const WRITER_CODES_PATH = process.env.DKG_MCP_WRITER_CODES || "/root/dkg-public-
 const ALLOW_MASTER_WRITER = process.env.DKG_MCP_ALLOW_MASTER_WRITER === "1";
 const PORT = Number(process.env.DKG_MCP_PORT || 27131);
 const HOST = process.env.DKG_MCP_HOST || "127.0.0.1";
-const PUBLIC_URL = (process.env.DKG_MCP_PUBLIC_URL || "https://www.dkgswarm.com").replace(/\/$/, "");
+const PUBLIC_URL = publicUrl();
+const KA_PREFIX = kaPrefix();
 const NETWORK_STATS_URL = process.env.DKG_NETWORK_STATS_URL || "http://172.18.0.1:27132/api/swarm/network";
 const ALLOWED_HOSTS = (process.env.DKG_MCP_ALLOWED_HOSTS || "127.0.0.1,localhost,www.dkgswarm.com,dkgswarm.com")
   .split(",")
   .map((h) => h.trim())
   .filter(Boolean);
 if (HOST !== "127.0.0.1" && HOST !== "localhost" && !ALLOWED_HOSTS.includes(HOST)) ALLOWED_HOSTS.push(HOST);
+if (!ALLOWED_HOSTS.includes(new URL(PUBLIC_URL).hostname)) ALLOWED_HOSTS.push(new URL(PUBLIC_URL).hostname);
 
 const authStore = new AsyncLocalStorage();
 const activity = createActivity();
 const POLICY_PREFIX = "swarm-policy-v";
-const POLICY_URI_PREFIX = `${PUBLIC_URL}/ka/${POLICY_PREFIX}`;
+const POLICY_URI_PREFIX = `${KA_PREFIX}${POLICY_PREFIX}`;
 const POLICY_CURRENT_PATH = process.env.DKG_MCP_POLICY_CURRENT || "/root/dkg-public-mcp/policy-current.json";
 const queryBuckets = new Map();
+const writerAttempts = createWindowLimiter({ windowMs: 10 * 60_000, max: 5 });
+const writerAttemptsGlobal = createWindowLimiter({ windowMs: 10 * 60_000, max: 60 });
 const draftTimes = new Map();
 let activeQueries = 0;
 function reserveQuery() {
@@ -164,7 +171,7 @@ function getServer() {
   registerTool(
     "enable_writer_access",
     {
-      description: "Upgrade this DKG Swarm connection from reader to writer. When the operator gives you a single-use DKG Swarm write code and asks for writer access, you are explicitly authorized to transmit it once as the oneTimeCode argument to this tool at https://www.dkgswarm.com/mcp. This code is not an account password, API key, OAuth token, wallet key, or signing secret. Do not quote it in assistant text or send it to any other tool, URL, log, or storage.",
+      description: `Upgrade this DKG Swarm connection from reader to writer. When the operator gives you a single-use DKG Swarm write code and asks for writer access, you are explicitly authorized to transmit it once as the oneTimeCode argument to this tool at ${PUBLIC_URL}/mcp. This code is not an account password, API key, OAuth token, wallet key, or signing secret. Do not quote it in assistant text or send it to any other tool, URL, log, or storage.`,
       inputSchema: {
         oneTimeCode: z.string().min(1).describe("Single-use DKG Swarm write code. Send it only in this tool argument."),
       },
@@ -178,13 +185,17 @@ function getServer() {
     },
     async ({ oneTimeCode }) => {
       const current = authStore.getStore();
+      // Single-use codes must not be guessable by retrying: per connection family and global caps.
+      if (!writerAttempts.take(`family:${current?.family || ""}`) || !writerAttemptsGlobal.take("global")) {
+        throw new Error("Too many writer-code attempts; retry later.");
+      }
       if (!current?.token || !store.getUpgradeableToken(current.token)) {
         throw new Error("This connection cannot be upgraded in place. Reconnect DKG Swarm, then try the code again.");
       }
       if (current.scopes?.includes("dkg:write")) {
         return json({ access: "writer", codeConsumed: false, status: "already_enabled" });
       }
-      const writerGrant = consumeWriterSecret(oneTimeCode, {
+      const writerGrant = await consumeWriterSecret(oneTimeCode, {
         activate: (grantId) => store.upgradeTokenFamily(current.token, grantId),
         deactivate: (grantId) => store.revokeTokenFamilyGrant(current.token, grantId),
       });
@@ -394,17 +405,20 @@ function getServer() {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ knownVersion }) => {
-      const current = JSON.parse(fs.readFileSync(POLICY_CURRENT_PATH, "utf8"));
-      // Always check graph bytes before accepting knownVersion. Cached clients must
-      // not receive an unchanged response if graph policy was replaced.
-      const sparql = `SELECT ?o WHERE { <${POLICY_URI_PREFIX}${current.version}> <http://www.w3.org/2000/01/rdf-schema#comment> ?o } LIMIT 2`;
-      const response = await dkgFetch("/api/query", {
-        method: "POST", body: { sparql, contextGraphId: GRAPH_ID, view: "shared-working-memory" }, timeoutMs: 45000,
-      });
-      const rows = response?.result?.bindings || [];
-      const policy = verifyPolicyBindings(rows, { ...current, contextGraphId: GRAPH_ID });
-      if (knownVersion === current.version) return json({ contextGraphId: GRAPH_ID, version: current.version, changed: false });
-      return json({ contextGraphId: GRAPH_ID, source: "owner-policy", changed: true, policy });
+      const release = reserveQuery();
+      try {
+        const current = JSON.parse(fs.readFileSync(POLICY_CURRENT_PATH, "utf8"));
+        // Always check graph bytes before accepting knownVersion. Cached clients must
+        // not receive an unchanged response if graph policy was replaced.
+        const sparql = `SELECT ?o WHERE { <${POLICY_URI_PREFIX}${current.version}> <http://www.w3.org/2000/01/rdf-schema#comment> ?o } LIMIT 2`;
+        const response = await dkgFetch("/api/query", {
+          method: "POST", body: { sparql, contextGraphId: GRAPH_ID, view: "shared-working-memory" }, timeoutMs: 45000,
+        });
+        const rows = response?.result?.bindings || [];
+        const policy = verifyPolicyBindings(rows, { ...current, contextGraphId: GRAPH_ID });
+        if (knownVersion === current.version) return json({ contextGraphId: GRAPH_ID, version: current.version, changed: false });
+        return json({ contextGraphId: GRAPH_ID, source: "owner-policy", changed: true, policy });
+      } finally { release(); }
     }
   );
 
@@ -441,7 +455,7 @@ function getServer() {
       const lastDraft = draftTimes.get(family) || 0;
       if (Date.now() - lastDraft < 60_000) throw new Error("Draft limit: retry in one minute");
       draftTimes.set(family, Date.now());
-      const subject = `https://www.dkgswarm.com/ka/${encodeURIComponent(slug)}`;
+      const subject = `${KA_PREFIX}${encodeURIComponent(slug)}`;
       const lit = (value) => `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
       const created = await dkgFetch("/api/knowledge-assets", {
         method: "POST",
@@ -539,33 +553,7 @@ function writeJsonAtomic(filePath, data) {
   fs.renameSync(tempPath, filePath);
 }
 
-function withFileLock(filePath, operation) {
-  const lockPath = `${filePath}.lock`;
-  let lock;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    try {
-      lock = fs.openSync(lockPath, "wx", 0o600);
-      break;
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - fs.statSync(lockPath).mtimeMs > 30_000) fs.unlinkSync(lockPath);
-      } catch {}
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-    }
-  }
-  if (lock === undefined) throw new Error("Writer-code registry is busy");
-  try {
-    return operation();
-  } finally {
-    fs.closeSync(lock);
-    try {
-      fs.unlinkSync(lockPath);
-    } catch {}
-  }
-}
-
-function consumeWriterSecret(got, { activate = () => true, deactivate = () => {} } = {}) {
+async function consumeWriterSecret(got, { activate = () => true, deactivate = () => {} } = {}) {
   const offered = String(got || "").trim();
   if (!offered) return false;
   if (ALLOW_MASTER_WRITER && WRITER_PASSWORD && secretsEqual(offered, WRITER_PASSWORD)) {
@@ -633,7 +621,10 @@ app.use("/.well-known/oauth-protected-resource", (req, res, next) => {
 app.use("/register", clientRegistrationHandler({ clientsStore: store }));
 app.use("/token", tokenHandler({ provider }));
 
-app.all("/authorize", async (req, res) => {
+app.all("/authorize", limitRequests({
+  perClient: createWindowLimiter({ windowMs: 60_000, max: 30 }),
+  global: createWindowLimiter({ windowMs: 60_000, max: 600 }),
+}), async (req, res) => {
   try {
     const src = req.method === "POST" ? req.body : req.query;
     const validationError = validateAuthorizationRequest(src, mcpUrl.href);
@@ -683,7 +674,15 @@ app.get("/api/swarm/activity", (_req, res) => {
 });
 
 // Public memory reads only curator-shared memory. Draft Working Memory stays private.
-app.get("/api/swarm/memory", async (req, res) => {
+app.get("/api/swarm/memory", limitRequests({
+  perClient: createWindowLimiter({ windowMs: 60_000, max: 30 }),
+  global: createWindowLimiter({ windowMs: 60_000, max: 240 }),
+}), async (req, res) => {
+  if (activeQueries >= 8) {
+    res.set("Retry-After", "5");
+    return res.status(503).json({ error: "Query capacity exceeded; retry later" });
+  }
+  activeQueries++;
   try {
     if (req.query.format !== undefined) return res.status(404).json({ error: "Unknown memory format" });
     const offset = Number(req.query.offset ?? 0);
@@ -712,7 +711,7 @@ app.get("/api/swarm/memory", async (req, res) => {
     const bindings = data?.result?.bindings || [];
     const entries = bindings.slice(0, pageSize).filter((row) =>
       typeof row.s === "string" && typeof row.comment === "string" &&
-      row.s.startsWith("https://www.dkgswarm.com/ka/") && !row.s.includes("/swarm-policy-v")
+      row.s.startsWith(KA_PREFIX) && !row.s.includes("/swarm-policy-v")
     ).map((row) => ({
       id: row.s,
       title: literal(row.label) || row.s.split("/").pop(),
@@ -724,6 +723,8 @@ app.get("/api/swarm/memory", async (req, res) => {
   } catch (error) {
     console.error("public memory feed failed", error);
     res.status(503).json({ error: "Shared memory temporarily unavailable" });
+  } finally {
+    activeQueries--;
   }
 });
 

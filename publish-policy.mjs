@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { kaPrefix } from "./public-url.mjs";
 import { policyDigest, verifyPolicyBindings } from "./policy-integrity.mjs";
 
 const filename = process.argv[2];
@@ -17,7 +18,7 @@ if (policy.contextGraphId !== "trac-marketing") throw new Error("Policy graph mi
 const token = (process.env.DKG_API_TOKEN || fs.readFileSync("/root/.dkg/auth.token", "utf8").split(/\n/).find((line) => line.trim() && !line.startsWith("#")) || "").trim();
 if (!token) throw new Error("DKG API token missing");
 const name = `swarm-policy-v${policy.version}`;
-const subject = `https://www.dkgswarm.com/ka/${name}`;
+const subject = `${kaPrefix()}${name}`;
 const lit = (value) => JSON.stringify(value);
 const api = (process.env.DKG_API_URL || "http://127.0.0.1:9200").replace(/\/$/, "");
 const request = async (url, body) => {
