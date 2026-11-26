@@ -8,6 +8,8 @@ import { isCollectivePush } from "./collector/curator.mjs";
 const execute = promisify(execFile);
 
 export const INTAKE_PATH = process.env.TRAC_CURATOR_INTAKE || "/root/dkg-swarm-webhooks/data/curator-intake.sqlite";
+// Same lock as trac-marketing-curator.service; set it where the MCP service account can write.
+export const CURATOR_LOCK_PATH = process.env.TRAC_CURATOR_LOCK || "/run/lock/trac-marketing-curator.lock";
 
 export function enqueueCuratorDraft(name, { filename = INTAKE_PATH } = {}) {
   fs.mkdirSync(path.dirname(filename), { recursive: true });
@@ -25,9 +27,10 @@ export function enqueueCuratorDraft(name, { filename = INTAKE_PATH } = {}) {
 export async function deliverCollectivePush(name, {
   executeFile = execute,
   scriptPath = process.env.TRAC_CURATOR_SCRIPT || "/root/dkg-swarm-webhooks/curator.mjs",
+  lockPath = CURATOR_LOCK_PATH,
 } = {}) {
   if (!isCollectivePush(name) || !/^[a-zA-Z0-9._-]{1,80}$/.test(name)) throw new Error("invalid collective push name");
-  const { stdout } = await executeFile("/usr/bin/flock", ["-w", "5", "/run/lock/trac-marketing-curator.lock",
+  const { stdout } = await executeFile("/usr/bin/flock", ["-w", "5", lockPath,
     process.execPath, scriptPath, "promote-community", name], {
     timeout: 180000, maxBuffer: 1024 * 1024,
   });
@@ -66,9 +69,19 @@ export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = 
   }
 }
 
-export function triggerCurator({ spawnProcess = spawn } = {}) {
+export function triggerCurator({ spawnProcess = spawn, triggerFile = process.env.TRAC_CURATOR_TRIGGER_FILE } = {}) {
   // Always signal: suppressing a second trigger can strand a draft after the
   // first curator run exits. systemd coalesces starts while the unit is active.
+  // An unprivileged service (User=dkg, NoNewPrivileges) cannot call systemctl start; it touches
+  // a file watched by trac-marketing-curator.path instead.
+  if (triggerFile) {
+    try {
+      fs.writeFileSync(triggerFile, `${new Date().toISOString()}\n`, { mode: 0o600 });
+    } catch (error) {
+      console.error("curator trigger failed", error);
+    }
+    return;
+  }
   const child = spawnProcess("/usr/bin/systemctl", ["start", "--no-block", "trac-marketing-curator.service"], {
     stdio: "ignore",
   });

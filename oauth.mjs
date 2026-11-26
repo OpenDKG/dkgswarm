@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { InvalidClientMetadataError, InvalidScopeError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
+import { InvalidClientMetadataError, InvalidScopeError, TooManyRequestsError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 
 const DATA_PATH = process.env.DKG_MCP_OAUTH_STORE || "/root/dkg-public-mcp/data/oauth.json";
 // First-party callbacks for current remote MCP clients. Loopback is allowed separately.
@@ -13,14 +13,56 @@ const ALLOWED_REDIRECT_HOSTS = (process.env.DKG_MCP_OAUTH_REDIRECT_HOSTS
   .map((h) => h.trim().toLowerCase())
   .filter(Boolean);
 const LOOPBACK_REDIRECT_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
+// Dynamically registered clients kept at most; preloaded clients do not count.
+const MAX_REGISTERED_CLIENTS = Math.max(1, Number(process.env.DKG_MCP_OAUTH_MAX_CLIENTS) || 1000);
+const HASH_PREFIX = "sha256:";
 
-function load(dataPath = DATA_PATH) {
+// Codes and tokens are bearer secrets: only their SHA-256 is stored.
+export function secretKey(secret) {
+  return `${HASH_PREFIX}${crypto.createHash("sha256").update(String(secret)).digest("hex")}`;
+}
+
+function hashLegacyKeys(records) {
+  let changed = false;
+  for (const key of Object.keys(records)) {
+    if (key.startsWith(HASH_PREFIX)) continue;
+    records[secretKey(key)] = records[key];
+    delete records[key];
+    changed = true;
+  }
+  return changed;
+}
+
+function readDb(dataPath) {
   try {
-    return JSON.parse(fs.readFileSync(dataPath, "utf8"));
+    const db = JSON.parse(fs.readFileSync(dataPath, "utf8"));
+    db.clients ||= {};
+    db.codes ||= {};
+    db.tokens ||= {};
+    // Plaintext keys (older stores, manual edits) are re-keyed in memory; the next save persists it.
+    hashLegacyKeys(db.codes);
+    hashLegacyKeys(db.tokens);
+    return db;
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     return { clients: {}, codes: {}, tokens: {} };
   }
+}
+
+// Parsed once and re-read only when the file changes on disk (another process or an operator).
+const cache = new Map();
+function load(dataPath = DATA_PATH) {
+  let mtimeMs = -1;
+  try {
+    mtimeMs = fs.statSync(dataPath).mtimeMs;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const hit = cache.get(dataPath);
+  if (hit && hit.mtimeMs === mtimeMs) return hit.db;
+  const db = readDb(dataPath);
+  cache.set(dataPath, { mtimeMs, db });
+  return db;
 }
 
 function pruneExpired(db, now = Date.now()) {
@@ -42,6 +84,7 @@ function save(db, dataPath = DATA_PATH) {
   const tempPath = path.join(path.dirname(dataPath), `.${path.basename(dataPath)}.${process.pid}.tmp`);
   fs.writeFileSync(tempPath, JSON.stringify(db, null, 2), { mode: 0o600 });
   fs.renameSync(tempPath, dataPath);
+  cache.set(dataPath, { mtimeMs: fs.statSync(dataPath).mtimeMs, db });
 }
 
 function redirectHostAllowed(uri) {
@@ -56,8 +99,9 @@ function redirectHostAllowed(uri) {
   }
 }
 
-export function createStore(preloadedClients = [], dataPath = DATA_PATH) {
+export function createStore(preloadedClients = [], dataPath = DATA_PATH, { maxClients = MAX_REGISTERED_CLIENTS } = {}) {
   const db = load(dataPath);
+  const preloadedIds = new Set(preloadedClients.map((client) => client.client_id));
   for (const client of preloadedClients) {
     if (!db.clients[client.client_id]) db.clients[client.client_id] = client;
   }
@@ -78,6 +122,10 @@ export function createStore(preloadedClients = [], dataPath = DATA_PATH) {
       if (uris.some((u) => !redirectHostAllowed(u))) {
         throw new InvalidClientMetadataError("redirect_uri host is not allowed");
       }
+      const dynamicCount = Object.keys(dbNow.clients).filter((id) => !preloadedIds.has(id)).length;
+      if (!dbNow.clients[client.client_id] && dynamicCount >= maxClients) {
+        throw new TooManyRequestsError("client registration limit reached");
+      }
       dbNow.clients[client.client_id] = client;
       save(dbNow, dataPath);
       console.log("oauth register", client.client_id, uris);
@@ -95,41 +143,41 @@ export function createStore(preloadedClients = [], dataPath = DATA_PATH) {
     },
     putCode(code, data) {
       const dbNow = load(dataPath);
-      dbNow.codes[code] = data;
+      dbNow.codes[secretKey(code)] = data;
       save(dbNow, dataPath);
     },
     takeCode(code) {
       const dbNow = load(dataPath);
-      const data = dbNow.codes[code];
+      const data = dbNow.codes[secretKey(code)];
       if (!data) return null;
-      delete dbNow.codes[code];
+      delete dbNow.codes[secretKey(code)];
       save(dbNow, dataPath);
       return data;
     },
     peekCode(code) {
-      return load(dataPath).codes[code] || null;
+      return load(dataPath).codes[secretKey(code)] || null;
     },
     putToken(token, data) {
       const dbNow = load(dataPath);
-      dbNow.tokens[token] = data;
+      dbNow.tokens[secretKey(token)] = data;
       save(dbNow, dataPath);
     },
     getToken(token) {
-      return load(dataPath).tokens[token] || null;
+      return load(dataPath).tokens[secretKey(token)] || null;
     },
     deleteToken(token) {
       const dbNow = load(dataPath);
-      delete dbNow.tokens[token];
+      delete dbNow.tokens[secretKey(token)];
       save(dbNow, dataPath);
     },
     getUpgradeableToken(token) {
-      const data = load(dataPath).tokens[token];
+      const data = load(dataPath).tokens[secretKey(token)];
       if (!data || data.type !== "access" || data.expiresAt < Date.now() || !data.tokenFamilyId) return null;
       return data;
     },
     upgradeTokenFamily(token, writerGrantId) {
       const dbNow = load(dataPath);
-      const access = dbNow.tokens[token];
+      const access = dbNow.tokens[secretKey(token)];
       if (!access || access.type !== "access" || access.expiresAt < Date.now() || !access.tokenFamilyId) return false;
       let updated = false;
       for (const row of Object.values(dbNow.tokens)) {
@@ -143,7 +191,7 @@ export function createStore(preloadedClients = [], dataPath = DATA_PATH) {
     },
     revokeTokenFamilyGrant(token, writerGrantId) {
       const dbNow = load(dataPath);
-      const access = dbNow.tokens[token];
+      const access = dbNow.tokens[secretKey(token)];
       if (!access?.tokenFamilyId) return false;
       let updated = false;
       for (const row of Object.values(dbNow.tokens)) {
