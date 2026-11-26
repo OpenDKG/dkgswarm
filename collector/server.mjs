@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
+import path from "node:path";
 import crypto from "node:crypto";
 import express from "express";
 import { createWatcher, normalizeXHandle } from "./watcher.mjs";
@@ -10,6 +11,8 @@ const DKG_API = (process.env.DKG_API_URL || "http://127.0.0.1:9200").replace(/\/
 const GRAPH_ID = process.env.DKG_PUBLIC_GRAPH_ID || "trac-marketing";
 let sharedStats = { count: null, expiresAt: 0 };
 let sharedStatsRefresh;
+// A whole integer: bare, or a quoted N-Triples literal with an optional datatype.
+const SHARED_COUNT_RE = /^(?:(\d+)|"(\d+)"(?:\^\^<[^<>\s]+>)?)$/;
 
 async function sharedPostCount() {
   if (Date.now() < sharedStats.expiresAt) return sharedStats.count;
@@ -26,8 +29,13 @@ async function sharedPostCount() {
     });
     if (!response.ok) throw new Error(`DKG query ${response.status}`);
     const body = await response.json();
-    const value = body?.result?.bindings?.[0]?.count;
-    const count = Number(String(value).match(/^"(\d+)"/)?.[1]);
+      const rawBinding = body?.result?.bindings?.[0]?.count;
+      const rawValue =
+        rawBinding && typeof rawBinding === "object" && "value" in rawBinding
+          ? rawBinding.value
+          : rawBinding;
+      const match = String(rawValue ?? "").match(SHARED_COUNT_RE);
+      const count = match ? Number(match[1] ?? match[2]) : Number.NaN;
     if (!Number.isSafeInteger(count)) throw new Error("DKG count unavailable");
     sharedStats = { count, expiresAt: Date.now() + 300000 };
     return count;
@@ -58,12 +66,11 @@ if (!SECRET || SECRET.length < 16) {
   process.exit(1);
 }
 
-function keyBuf() {
-  return crypto.scryptSync(SECRET, "dkgswarm-webhooks-v1", 32);
-}
+const DERIVED_KEY = crypto.scryptSync(SECRET, "dkgswarm-webhooks-v1", 32);
+
 function encrypt(plain) {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", keyBuf(), iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", DERIVED_KEY, iv);
   const enc = Buffer.concat([cipher.update(String(plain), "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return Buffer.concat([iv, tag, enc]).toString("base64");
@@ -73,7 +80,7 @@ function decrypt(blob) {
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const data = buf.subarray(28);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", keyBuf(), iv);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", DERIVED_KEY, iv);
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString("utf8");
 }
@@ -91,8 +98,11 @@ function loadDb() {
   }
 }
 function saveDb(db) {
-  fs.mkdirSync("/root/dkg-swarm-webhooks/data", { recursive: true });
-  fs.writeFileSync(STORE, JSON.stringify(db, null, 2));
+  const dir = path.dirname(STORE);
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const tmp = `${STORE}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, JSON.stringify(db, null, 2), { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tmp, STORE);
 }
 
 function isPrivateHost(hostname) {
@@ -211,9 +221,16 @@ app.post("/api/swarm/register", (req, res) => {
   res.status(410).json({ ok: false, error: "Webhook registration retired; use scheduled DKG reads." });
 });
 
+function constantTimeEquals(a, b) {
+  const bufA = Buffer.from(String(a || ""), "utf8");
+  const bufB = Buffer.from(String(b || ""), "utf8");
+  if (bufA.length === 0 || bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
 function requireAdmin(req, res, next) {
   const got = (req.get("x-swarm-admin") || req.get("authorization") || "").replace(/^Bearer\s+/i, "");
-  if (!ADMIN || got !== ADMIN) {
+  if (!ADMIN || !constantTimeEquals(got, ADMIN)) {
     res.status(401).json({ ok: false, error: "admin token required" });
     return;
   }

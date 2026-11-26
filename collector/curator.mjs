@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-const graph = "trac-marketing";
+const graph = process.env.DKG_PUBLIC_GRAPH_ID || "trac-marketing";
 const watcherDb = () => new DatabaseSync(process.env.WATCH_DB || "/root/dkg-swarm-webhooks/data/watcher.sqlite", { readOnly: true });
 const api = (process.env.DKG_API_URL || "http://127.0.0.1:9200").replace(/\/$/, "");
 const token = process.argv[1]?.endsWith("curator.mjs") ? (fs.readFileSync(process.env.DKG_API_TOKEN_FILE || "/root/.dkg/auth.token", "utf8")
@@ -294,6 +294,8 @@ async function main() {
       console.log(JSON.stringify({ promoted: name, recovered: true }));
       return;
     }
+    // A validated push always has these four; other evidence only gets the ones it has.
+    const pushField = (predicate, value) => (isPush || value ? [quad(subject, predicate, lit(value))] : []);
     await ensureCuratorDraft(name, subject, [
       quad(subject, rdfType, `${ns}${isPush ? "CollectivePush" : "CommunityEvidence"}`),
       ...(isPush ? [quad(subject, `${ns}targetPost`, canonical)] : [quad(subject, "https://schema.org/url", canonical), quad(subject, `${ns}canonicalUrl`, canonical)]),
@@ -302,10 +304,10 @@ async function main() {
       quad(subject, `${ns}sourceTier`, lit(isPush ? "authenticated-writer-directive" : "community-unverified")),
       quad(subject, `${ns}observedAt`, lit(new Date().toISOString())),
       quad(subject, `${ns}claimStatus`, lit(isPush ? "coordination request; claims require independent verification" : "community-submitted; not independently verified")),
-      quad(subject, "https://schema.org/identifier", lit(postId)),
-      quad(subject, "https://schema.org/dateCreated", lit(issuedAt)),
-      quad(subject, "https://schema.org/expires", lit(expiresAt)),
-      quad(subject, `${ns}proposedAngle`, lit(angle)),
+      ...pushField("https://schema.org/identifier", postId),
+      ...pushField("https://schema.org/dateCreated", issuedAt),
+      ...pushField("https://schema.org/expires", expiresAt),
+      ...pushField(`${ns}proposedAngle`, angle),
       quad(subject, `${ns}derivedFrom`, `https://www.dkgswarm.com/ka/${id}`),
     ]);
     let shared;

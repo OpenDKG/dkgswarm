@@ -112,6 +112,9 @@ test("promotion confirms SWM, preserves provenance, audits and acknowledges only
     assert.equal(created.alsoShareSwm, false);
     assert.equal(created.quads.find((q) => q.predicate === `${ns}derivedFrom`).object, `https://www.dkgswarm.com/ka/${name}`);
     assert.match(created.quads.find((q) => q.predicate === `${ns}sourceTier`).object, /authenticated-writer-directive/);
+    for (const predicate of ["https://schema.org/identifier", "https://schema.org/dateCreated", "https://schema.org/expires", `${ns}proposedAngle`]) {
+      assert.equal(created.quads.find((q) => q.predicate === predicate)?.object, JSON.stringify(fields[predicate]), predicate);
+    }
     assert.ok(db.prepare("SELECT reviewed_at FROM drafts WHERE name = ?").get(name).reviewed_at);
     const audit = new DatabaseSync(review);
     assert.equal(audit.prepare("SELECT status FROM decisions WHERE id = ?").get(name).status, "promoted");
@@ -120,6 +123,51 @@ test("promotion confirms SWM, preserves provenance, audits and acknowledges only
     const recovered = await run();
     assert.match(recovered.stdout, /"recovered":true/);
     assert.equal(shareCount, 2);
+  } finally {
+    db.close();
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("community evidence promotion writes no empty push statements", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-community-"));
+  const filename = path.join(dir, "intake.sqlite");
+  const db = new DatabaseSync(filename);
+  db.exec("CREATE TABLE drafts(name TEXT PRIMARY KEY, queued_at TEXT, reviewed_at TEXT); INSERT INTO drafts VALUES ('community-demo','revision-one',NULL)");
+  const tokenFile = path.join(dir, "token");
+  fs.writeFileSync(tokenFile, "test-token");
+  const fields = { "https://schema.org/url": "https://x.com/Author/status/123456789", "https://schema.org/publisher": "@Author",
+    "http://www.w3.org/2000/01/rdf-schema#comment": "Community observation with enough detail to be substantive evidence." };
+  let created;
+  let shared = false;
+  const server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = JSON.parse(raw);
+    let result = {};
+    if (req.url === "/api/query") {
+      // The curator's own subject is absent until written, then reads back as written.
+      const rows = body.sparql.includes("/ka/curator-community-") ? (created?.quads || []).map((q) => ({ p: q.predicate, o: q.object }))
+        : body.sparql.startsWith("SELECT ?p") ? Object.entries(fields).map(([p, o]) => ({ p, o }))
+        : shared && body.view === "shared-working-memory" ? [{ s: created.quads[0].subject, o: fields["https://schema.org/url"] }] : [];
+      result = { result: { bindings: rows } };
+    } else if (req.url === "/api/knowledge-assets") created = body;
+    else if (req.url.endsWith("/swm/share")) shared = true;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify(result));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const promoted = await promisify(execFile)(process.execPath, [new URL("../curator.mjs", import.meta.url).pathname, "promote-community", "community-demo"], {
+      env: { ...process.env, DKG_API_URL: `http://127.0.0.1:${server.address().port}`, DKG_API_TOKEN_FILE: tokenFile,
+        TRAC_CURATOR_INTAKE: filename, TRAC_CURATOR_REVIEW: path.join(dir, "review.sqlite") },
+    });
+    assert.match(promoted.stdout, /"promoted":"curator-community-demo"/);
+    const predicates = created.quads.map((q) => q.predicate);
+    for (const suffix of ["schema.org/identifier", "schema.org/dateCreated", "schema.org/expires", "curator/proposedAngle"]) {
+      assert.ok(!predicates.some((p) => p.endsWith(suffix)), suffix);
+    }
   } finally {
     db.close();
     await new Promise((resolve) => server.close(resolve));
