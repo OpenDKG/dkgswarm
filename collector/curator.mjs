@@ -242,6 +242,8 @@ async function main() {
       console.log(JSON.stringify({ promoted: name, recovered: true }));
       return;
     }
+    // A validated push always has these four; other evidence only gets the ones it has.
+    const pushField = (predicate, value) => (isPush || value ? [quad(subject, predicate, lit(value))] : []);
     if (!current.some((item) => (item.s?.value || item.s) === subject)) await request("/api/knowledge-assets", { contextGraphId: graph, name, finalize: false, alsoShareSwm: false, quads: [
       quad(subject, rdfType, `${ns}${isPush ? "CollectivePush" : "CommunityEvidence"}`),
       ...(isPush ? [quad(subject, `${ns}targetPost`, canonical)] : [quad(subject, "https://schema.org/url", canonical), quad(subject, `${ns}canonicalUrl`, canonical)]),
@@ -250,10 +252,10 @@ async function main() {
       quad(subject, `${ns}sourceTier`, lit(isPush ? "authenticated-writer-directive" : "community-unverified")),
       quad(subject, `${ns}observedAt`, lit(new Date().toISOString())),
       quad(subject, `${ns}claimStatus`, lit(isPush ? "coordination request; claims require independent verification" : "community-submitted; not independently verified")),
-      ...(postId ? [quad(subject, "https://schema.org/identifier", lit(postId))] : []),
-      ...(issuedAt ? [quad(subject, "https://schema.org/dateCreated", lit(issuedAt))] : []),
-      ...(expiresAt ? [quad(subject, "https://schema.org/expires", lit(expiresAt))] : []),
-      ...(angle ? [quad(subject, `${ns}proposedAngle`, lit(angle))] : []),
+      ...pushField("https://schema.org/identifier", postId),
+      ...pushField("https://schema.org/dateCreated", issuedAt),
+      ...pushField("https://schema.org/expires", expiresAt),
+      ...pushField(`${ns}proposedAngle`, angle),
       quad(subject, `${ns}derivedFrom`, `https://www.dkgswarm.com/ka/${id}`),
     ] });
     let shared;

@@ -11,6 +11,8 @@ const DKG_API = (process.env.DKG_API_URL || "http://127.0.0.1:9200").replace(/\/
 const GRAPH_ID = process.env.DKG_PUBLIC_GRAPH_ID || "trac-marketing";
 let sharedStats = { count: null, expiresAt: 0 };
 let sharedStatsRefresh;
+// A whole integer: bare, or a quoted N-Triples literal with an optional datatype.
+const SHARED_COUNT_RE = /^(?:(\d+)|"(\d+)"(?:\^\^<[^<>\s]+>)?)$/;
 
 async function sharedPostCount() {
   if (Date.now() < sharedStats.expiresAt) return sharedStats.count;
@@ -32,8 +34,8 @@ async function sharedPostCount() {
         rawBinding && typeof rawBinding === "object" && "value" in rawBinding
           ? rawBinding.value
           : rawBinding;
-      const match = String(rawValue ?? "").match(/^"?(\d+)/);
-      const count = match ? Number(match[1]) : Number.NaN;
+      const match = String(rawValue ?? "").match(SHARED_COUNT_RE);
+      const count = match ? Number(match[1] ?? match[2]) : Number.NaN;
     if (!Number.isSafeInteger(count)) throw new Error("DKG count unavailable");
     sharedStats = { count, expiresAt: Date.now() + 300000 };
     return count;

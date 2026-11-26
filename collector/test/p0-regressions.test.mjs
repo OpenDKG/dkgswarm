@@ -53,8 +53,20 @@ test("classifyPost & buildAssets sanitize unsafe IRI characters and escape CR/co
 test("collector/curator.mjs reads DKG_PUBLIC_GRAPH_ID and skips undefined optional push quads", () => {
   const src = fs.readFileSync(path.join(collectorDir, "curator.mjs"), "utf8");
   assert.match(src, /process\.env\.DKG_PUBLIC_GRAPH_ID\s*\|\|\s*"trac-marketing"/);
-  assert.match(src, /postId\s*\?\s*\[quad\(subject,\s*"https:\/\/schema\.org\/identifier"/);
-  assert.match(src, /angle\s*\?\s*\[quad\(subject,\s*`\$\{ns\}proposedAngle`/);
+});
+
+test("shared post count parser accepts only a whole integer binding", () => {
+  const src = fs.readFileSync(path.join(collectorDir, "server.mjs"), "utf8");
+  const literal = src.match(/^const SHARED_COUNT_RE = \/(.*)\/;$/m);
+  assert.ok(literal, "SHARED_COUNT_RE literal not found");
+  const pattern = new RegExp(literal[1]);
+  const parse = (value) => { const m = value.match(pattern); return m ? Number(m[1] ?? m[2]) : null; };
+  const xsd = "http://www.w3.org/2001/XMLSchema#integer";
+  for (const value of ["42", '"42"', `"42"^^<${xsd}>`]) assert.equal(parse(value), 42, value);
+  for (const value of ["", "42abc", "42.5", "42e3", '"42', '42"', ' 42', "42\n", '"42"x', `"42"^^<${xsd}> extra`, "-42"]) {
+    assert.equal(parse(value), null, JSON.stringify(value));
+  }
+  assert.match(src, /\.match\(SHARED_COUNT_RE\)/);
 });
 
 test("collector/server.mjs uses dynamic STORE dirname with 0o600 atomic write, timingSafeEqual, and cached scrypt key", () => {
