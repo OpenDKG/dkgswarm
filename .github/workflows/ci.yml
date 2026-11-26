@@ -18,6 +18,9 @@ jobs:
       - run: npm ci
       - run: npm ci
         working-directory: collector
+      - run: npm audit --omit=dev
+      - run: npm audit --omit=dev
+        working-directory: collector
       - run: npm test
       - run: npm test
         working-directory: collector
