@@ -766,7 +766,12 @@ app.use("/mcp", async (req, res, next) => {
 app.post("/mcp", async (req, res) => {
   const server = getServer();
   try {
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    // Express already parsed the body (100 KiB default); the transport bound is
+    // the fallback for any path that hands it a raw body instead.
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      maxRequestBodySize: 100 * 1024,
+    });
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
     res.on("close", () => {

@@ -1,6 +1,8 @@
 {
   "name": "dkg-swarm-webhooks",
-  "engines": { "node": ">=22.13.0" },
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "version": "1.0.0",
   "license": "MIT",
   "type": "module",
@@ -10,5 +12,8 @@
   },
   "dependencies": {
     "express": "^5.1.0"
+  },
+  "overrides": {
+    "body-parser": "^2.4.0"
   }
 }
