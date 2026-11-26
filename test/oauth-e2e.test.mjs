@@ -25,6 +25,11 @@ test("isolated server completes discovery, DCR, PKCE exchange, and MCP initializ
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dkg-oauth-e2e-"));
   const port = await freePort();
   const publicUrl = `http://127.0.0.1:${port}`;
+  // /health is readiness now: a complete, trusted policy pin is required.
+  fs.copyFileSync(
+    new URL("../policy-current.example.json", import.meta.url),
+    path.join(dir, "policy-current.json"),
+  );
   let logs = "";
   const child = spawn(process.execPath, [serverPath], {
     env: {

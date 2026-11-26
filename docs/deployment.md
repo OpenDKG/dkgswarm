@@ -156,10 +156,17 @@ done
 cmp "$RELEASE/collector/curator.mjs" "$MCP/collector/curator.mjs"
 cmp "$RELEASE/scheduler/scheduled-curator.mjs" "$DRAFTS/scheduled-curator.mjs"
 
+curl -fsS http://127.0.0.1:27131/livez
 curl -fsS http://127.0.0.1:27131/health
 curl -fsS https://www.dkgswarm.com/.well-known/oauth-protected-resource/mcp
 curl -fsS https://www.dkgswarm.com/.well-known/oauth-authorization-server
 ```
+
+`/livez` reports process liveness only. `/health` (and its alias `/readyz`) is readiness: it
+returns `200` with `ready: true` only when `policy-current.json` is a complete, readable
+`version` + `sha256` pin, and `503` with a stable `policy.code` (`POLICY_PIN_MISSING`,
+`POLICY_PIN_UNREADABLE`, `POLICY_PIN_MALFORMED` or `POLICY_PIN_INCOMPLETE`) otherwise, without
+calling the graph.
 
 Import validation exits nonzero on a missing relative file or package from the runtime root.
 An absent `viem` is reported as an optional warning; when `TRAC_VIEM_MODULE` is explicitly set,

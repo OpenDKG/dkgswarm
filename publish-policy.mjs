@@ -1,12 +1,19 @@
 import fs from "node:fs";
-import { policyDigest, verifyPolicyBindings } from "./policy-integrity.mjs";
+import { policyDigest, readPolicyPin, verifyPolicyBindings } from "./policy-integrity.mjs";
 
 const filename = process.argv[2];
 if (!filename) throw new Error("Usage: node publish-policy.mjs <policy-vN.json>");
 const policy = JSON.parse(fs.readFileSync(filename, "utf8"));
 if (policy.kind !== "swarm-coordination-policy" || !Number.isSafeInteger(policy.version) || policy.version < 1) throw new Error("Invalid policy");
 const pointer = process.env.DKG_MCP_POLICY_CURRENT || "/root/dkg-public-mcp/policy-current.json";
-const current = JSON.parse(fs.readFileSync(pointer, "utf8"));
+let current;
+try {
+  current = readPolicyPin(pointer);
+} catch (error) {
+  // Stable code instead of a raw TypeError on a missing or incomplete pin.
+  console.error(`${error?.code || "POLICY_PIN_INVALID"}: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(1);
+}
 const sha256 = policyDigest(policy);
 // Restore is allowed only for the exact pinned bytes; ordinary releases stay strictly N+1.
 const restoring = policy.version === current.version;
