@@ -31,7 +31,7 @@ be audited.
 | Import validation | `scripts/check-imports.mjs` | release worktree / runtime roots | Resolves static imports and actually invokes `loadViem`; warns when optional `viem` is absent, fails when `TRAC_VIEM_MODULE` is explicitly set but invalid |
 | Static site | `site/*` | public web root behind the edge proxy | Tracked for history and already public. Website content/build work is outside this publication change; these files are not modified or deleted here |
 | Tests and CI | `test/*`, `collector/test/*`, `.github/workflows/ci.yml` | CI only | Root suite (MCP, scheduler, import checks) and collector suite run on Node.js 22 and 24 |
-| Docs and licensing | `README.md`, `docs/*`, `LICENSE`, `THIRD_PARTY_NOTICES.md` | not deployed | MIT owner license; merged PR #1 ISC notice preserved |
+| Docs and licensing | `README.md`, `docs/*`, `LICENSE`, `THIRD_PARTY_NOTICES.md` | not deployed | GPL-3.0-or-later; earlier MIT notice and merged PR #1 ISC notice preserved |
 
 ## Owned service and timer inventory
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 export const SOCIAL_WORKER_PROFILE_URI = "dkg://profiles/social-worker-v1";
 
 export const SOCIAL_WORKER_PROFILE = Object.freeze({

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 (() => {
   const nodes = document.querySelector('#nodes');
   const graph = document.querySelector('#graph');

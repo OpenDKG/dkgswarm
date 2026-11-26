@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import { createHash, timingSafeEqual } from "node:crypto";
 
 // The digest is pinned outside the graph. A graph writer cannot change trusted policy bytes.

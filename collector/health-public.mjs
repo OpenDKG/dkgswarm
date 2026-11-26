@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import fs from "node:fs";
 
 const LEVELS = new Set(["green", "yellow", "red"]);

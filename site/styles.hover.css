@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Extra motion: hover shine on agent cards */
 .agent-card{position:relative;overflow:hidden}
 .agent-card::before{content:'';position:absolute;left:-40%;top:0;width:35%;height:100%;background:linear-gradient(90deg,transparent,rgba(124,255,107,0.22),transparent);transform:skewX(-18deg);opacity:0}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 const NS = "https://www.dkgswarm.com/ontology/curator/";
 const RDF_COMMENT = "http://www.w3.org/2000/01/rdf-schema#comment";
 const ARTICLE_BODY = "https://schema.org/articleBody";

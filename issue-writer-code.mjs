@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: GPL-3.0-or-later
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";

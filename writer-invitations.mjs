@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 export const WRITER_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function writerInvitationExpiry(row) {
