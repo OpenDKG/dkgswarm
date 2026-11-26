@@ -44,3 +44,14 @@ test("write_working_memory bounds metadata and applies both guards before creati
   assert.match(source, /angle: z\.string\(\)\.max\(280\)/);
   assert.match(source, /sourceUrl: z\.string\(\)\.max\(2048\)/);
 });
+
+test("write_working_memory literals escape carriage returns and control characters without relying on another change", () => {
+  const source = fs.readFileSync(new URL("../server.mjs", import.meta.url), "utf8");
+  const definition = source.match(/const lit = \(value\) => .*;$/m)?.[0];
+  assert.ok(definition, "literal helper not found");
+  const lit = new Function(`${definition} return lit;`)();
+  const hostile = 'a\r\n" . <urn:x> <urn:y> "\u0000\u0008\u001f\\';
+  const literal = lit(hostile);
+  assert.doesNotMatch(literal, /[\u0000-\u001f]/);
+  assert.equal(JSON.parse(literal), hostile);
+});

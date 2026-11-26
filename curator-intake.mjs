@@ -3,7 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { isCollectivePush, pushQueueExpired } from "./collector/curator.mjs";
+import { decision, isCollectivePush, pushQueueExpired } from "./collector/curator.mjs";
 
 const execute = promisify(execFile);
 
@@ -52,7 +52,7 @@ export async function routeDraft(name, { enqueue = enqueueCuratorDraft, deliver 
 /** Safety cap in addition to the expiry window; a push older than its lifetime is never retried. */
 export const MAX_PUSH_DELIVERY_ATTEMPTS = 150;
 
-export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = deliverCollectivePush, at = Date.now() } = {}) {
+export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = deliverCollectivePush, at = Date.now(), reviewFilename } = {}) {
   if (!fs.existsSync(filename)) return;
   const db = new DatabaseSync(filename);
   let names;
@@ -67,8 +67,13 @@ export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = 
     const retire = db.prepare("UPDATE drafts SET reviewed_at = ? WHERE name = ? AND reviewed_at IS NULL");
     const live = [];
     for (const row of pending) {
-      if (pushQueueExpired(row, at) || row.delivery_attempts >= MAX_PUSH_DELIVERY_ATTEMPTS) retire.run(new Date(at).toISOString(), row.name);
-      else live.push(row);
+      const reason = pushQueueExpired(row, at) ? "collective push exceeded its queue lifetime"
+        : row.delivery_attempts >= MAX_PUSH_DELIVERY_ATTEMPTS ? "collective push reached the delivery attempt cap" : null;
+      if (!reason) { live.push(row); continue; }
+      // Audit first. If it cannot be written, the row stays queued (and undelivered) for the next run.
+      try { decision("community", row.name, "expired", reason, reviewFilename); }
+      catch (error) { console.error("collective push retirement not recorded", row.name, error.message); continue; }
+      retire.run(new Date(at).toISOString(), row.name);
     }
     names = live.slice(0, 10);
     const attempted = db.prepare("UPDATE drafts SET delivery_attempt_at = ?, delivery_attempts = delivery_attempts + 1 WHERE name = ?");

@@ -20,18 +20,20 @@ const rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const intakePath = process.env.TRAC_CURATOR_INTAKE || "/root/dkg-swarm-webhooks/data/curator-intake.sqlite";
 const reviewPath = process.env.TRAC_CURATOR_REVIEW || "/root/dkg-swarm-webhooks/data/curator-review.sqlite";
 
-function reviewStore() {
-  const store = new DatabaseSync(reviewPath);
+function reviewStore(filename = reviewPath) {
+  const store = new DatabaseSync(filename);
   store.exec(`PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS decisions (kind TEXT NOT NULL, id TEXT NOT NULL, status TEXT NOT NULL,
       reason TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(kind,id));`);
   return store;
 }
 
-function decision(kind, id, status, reason = "") {
-  const store = reviewStore();
+export function decision(kind, id, status, reason = "", filename = reviewPath) {
+  const store = reviewStore(filename);
+  // A late expiry must not erase the record that a push was already delivered.
   try { store.prepare(`INSERT INTO decisions VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(kind,id) DO UPDATE SET status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at`)
+    ON CONFLICT(kind,id) DO UPDATE SET status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at
+    WHERE NOT (decisions.status = 'promoted' AND excluded.status = 'expired')`)
     .run(kind, id, status, reason.slice(0, 300), new Date().toISOString()); }
   finally { store.close(); }
 }

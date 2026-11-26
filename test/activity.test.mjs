@@ -142,3 +142,17 @@ test("old rows roll up into daily aggregates without changing totals, and only m
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("the activity store path comes from DKG_MCP_ACTIVITY_STORE", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "activity-env-"));
+  const previous = process.env.DKG_MCP_ACTIVITY_STORE;
+  process.env.DKG_MCP_ACTIVITY_STORE = path.join(dir, "from-env.sqlite");
+  try {
+    createActivity();
+    assert.ok(fs.existsSync(path.join(dir, "from-env.sqlite")));
+  } finally {
+    if (previous === undefined) delete process.env.DKG_MCP_ACTIVITY_STORE;
+    else process.env.DKG_MCP_ACTIVITY_STORE = previous;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { enqueueCuratorDraft, triggerCurator, routeDraft, deliverCollectivePush, retryCollectivePushes } from "../curator-intake.mjs";
+import { enqueueCuratorDraft, triggerCurator, routeDraft, deliverCollectivePush, retryCollectivePushes, MAX_PUSH_DELIVERY_ATTEMPTS } from "../curator-intake.mjs";
+import { decision } from "../collector/curator.mjs";
 
 test("curator intake records each draft once and requeues updated drafts", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-intake-"));
@@ -85,6 +86,12 @@ test("retry rotates failed pushes so older errors cannot starve later delivery",
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+const decisions = (filename) => {
+  const db = new DatabaseSync(filename);
+  try { return db.prepare("SELECT kind, id, status, reason FROM decisions ORDER BY id").all().map((row) => ({ ...row })); }
+  finally { db.close(); }
+};
+
 test("expired collective pushes leave the retry queue without another delivery attempt", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-expired-retry-"));
   const filename = path.join(dir, "intake.sqlite");
@@ -96,9 +103,13 @@ test("expired collective pushes leave the retry queue without another delivery a
     db.close();
     const delivered = [];
     const deliver = async (name) => { delivered.push(name); throw new Error("temporary"); };
-    await retryCollectivePushes({ filename, deliver });
-    await retryCollectivePushes({ filename, deliver });
+    const reviewFilename = path.join(dir, "review.sqlite");
+    await retryCollectivePushes({ filename, deliver, reviewFilename });
+    await retryCollectivePushes({ filename, deliver, reviewFilename });
     assert.deepEqual(delivered, ["collective-push-fresh", "collective-push-fresh"]);
+    assert.deepEqual(decisions(reviewFilename), [
+      { kind: "community", id: "collective-push-stale", status: "expired", reason: "collective push exceeded its queue lifetime" },
+    ]);
     const check = new DatabaseSync(filename);
     try {
       assert.ok(check.prepare("SELECT reviewed_at FROM drafts WHERE name = ?").get("collective-push-stale").reviewed_at);
@@ -126,4 +137,45 @@ test("trigger queues nonblocking systemd start", () => {
     return { on() {}, unref() {} };
   } });
   assert.deepEqual(called.slice(0, 2), ["/usr/bin/systemctl", ["start", "--no-block", "trac-marketing-curator.service"]]);
+});
+
+test("a push at the attempt cap is retired with an audit decision and keeps an earlier promotion", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-cap-"));
+  const filename = path.join(dir, "intake.sqlite");
+  const reviewFilename = path.join(dir, "review.sqlite");
+  try {
+    enqueueCuratorDraft("collective-push-capped", { filename });
+    enqueueCuratorDraft("collective-push-delivered", { filename });
+    await retryCollectivePushes({ filename, reviewFilename, deliver: async () => {} });
+    const db = new DatabaseSync(filename);
+    db.prepare("UPDATE drafts SET delivery_attempts = ?").run(MAX_PUSH_DELIVERY_ATTEMPTS);
+    db.close();
+    decision("community", "collective-push-delivered", "promoted", "", reviewFilename);
+    await retryCollectivePushes({ filename, reviewFilename, deliver: async () => assert.fail("retired pushes are not delivered") });
+    assert.deepEqual(decisions(reviewFilename), [
+      { kind: "community", id: "collective-push-capped", status: "expired", reason: "collective push reached the delivery attempt cap" },
+      { kind: "community", id: "collective-push-delivered", status: "promoted", reason: "" },
+    ]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a push is not retired or delivered while its audit decision cannot be written", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-audit-fail-"));
+  const filename = path.join(dir, "intake.sqlite");
+  const errors = t.mock.method(console, "error", () => {});
+  const queued = () => {
+    const db = new DatabaseSync(filename);
+    try { return db.prepare("SELECT reviewed_at FROM drafts WHERE name = ?").get("collective-push-stale").reviewed_at; }
+    finally { db.close(); }
+  };
+  try {
+    enqueueCuratorDraft("collective-push-stale", { filename });
+    const at = Date.now() + 3 * 3600000;
+    const deliver = async () => assert.fail("an expired push is never delivered");
+    await retryCollectivePushes({ filename, deliver, at, reviewFilename: path.join(dir, "missing", "review.sqlite") });
+    assert.equal(queued(), null);
+    assert.equal(errors.mock.callCount(), 1);
+    await retryCollectivePushes({ filename, deliver, at, reviewFilename: path.join(dir, "review.sqlite") });
+    assert.ok(queued());
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
