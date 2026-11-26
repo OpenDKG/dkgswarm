@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash, timingSafeEqual } from "node:crypto";
 import express from "express";
+import { isReservedDraftName, safeSourceIri } from "./draft-guards.mjs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -415,12 +416,12 @@ function getServer() {
       inputSchema: {
         name: z.string().min(1).max(80).describe("Asset name, e.g. campaign-brief-2026-09"),
         text: z.string().min(40).max(8192).describe("Plain text stored as a rdfs:comment literal"),
-        sourceUrl: z.string().url().optional().describe("Required for collective-push drafts: canonical public source URL"),
-        publisher: z.string().optional().describe("Required for collective-push drafts: original publisher or X account"),
+        sourceUrl: z.string().max(2048).url().optional().describe("Required for collective-push drafts: canonical public source URL"),
+        publisher: z.string().max(80).optional().describe("Required for collective-push drafts: original publisher or X account"),
         postId: z.string().regex(/^\d{8,22}$/).optional().describe("Required for collective pushes: X post ID matching sourceUrl"),
         issuedAt: z.string().datetime({ offset: true }).optional().describe("Required for collective pushes: ISO issue time"),
         expiresAt: z.string().datetime({ offset: true }).optional().describe("Required for collective pushes: ISO expiry time"),
-        angle: z.string().optional().describe("Required for collective pushes: proposed marketing angle, not verified fact"),
+        angle: z.string().max(280).optional().describe("Required for collective pushes: proposed marketing angle, not verified fact"),
         shareToSwm: z.boolean().optional().describe("Retired; validated collective pushes deliver automatically, ordinary drafts require review"),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -433,6 +434,8 @@ function getServer() {
       const slug = normalizeDraftName(name);
       if (!/[a-zA-Z0-9]/.test(slug)) throw new Error("Asset name must include a letter or digit");
       if (/^swarm-policy/i.test(slug) || /swarm.policy/i.test(slug)) throw new Error("Owner policy names are reserved");
+      if (isReservedDraftName(slug)) throw new Error("This name prefix is reserved for system drafts");
+      const iriSourceUrl = sourceUrl === undefined ? undefined : safeSourceIri(sourceUrl);
       const collectivePush = isCollectivePush(slug);
       if (collectivePush) {
         if (!sourceUrl || !publisher || !postId || !issuedAt || !expiresAt || !angle) throw new Error("Collective pushes require sourceUrl, publisher, postId, issuedAt, expiresAt, angle");
@@ -442,7 +445,7 @@ function getServer() {
       if (Date.now() - lastDraft < 60_000) throw new Error("Draft limit: retry in one minute");
       draftTimes.set(family, Date.now());
       const subject = `https://www.dkgswarm.com/ka/${encodeURIComponent(slug)}`;
-      const lit = (value) => `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
+      const lit = (value) => JSON.stringify(String(value ?? ""));
       const created = await dkgFetch("/api/knowledge-assets", {
         method: "POST",
         body: {
@@ -461,7 +464,7 @@ function getServer() {
               predicate: "http://www.w3.org/2000/01/rdf-schema#comment",
               object: lit(text),
             },
-            ...(sourceUrl ? [{ subject, predicate: "https://schema.org/url", object: sourceUrl }] : []),
+            ...(iriSourceUrl ? [{ subject, predicate: "https://schema.org/url", object: iriSourceUrl }] : []),
             ...(publisher ? [{ subject, predicate: "https://schema.org/publisher", object: lit(publisher) }] : []),
             ...(postId ? [{ subject, predicate: "https://schema.org/identifier", object: lit(postId) }] : []),
             ...(issuedAt ? [{ subject, predicate: "https://schema.org/dateCreated", object: lit(issuedAt) }] : []),

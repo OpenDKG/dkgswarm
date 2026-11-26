@@ -20,18 +20,20 @@ const rdfType = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const intakePath = process.env.TRAC_CURATOR_INTAKE || "/root/dkg-swarm-webhooks/data/curator-intake.sqlite";
 const reviewPath = process.env.TRAC_CURATOR_REVIEW || "/root/dkg-swarm-webhooks/data/curator-review.sqlite";
 
-function reviewStore() {
-  const store = new DatabaseSync(reviewPath);
+function reviewStore(filename = reviewPath) {
+  const store = new DatabaseSync(filename);
   store.exec(`PRAGMA busy_timeout = 5000;
     CREATE TABLE IF NOT EXISTS decisions (kind TEXT NOT NULL, id TEXT NOT NULL, status TEXT NOT NULL,
       reason TEXT, updated_at TEXT NOT NULL, PRIMARY KEY(kind,id));`);
   return store;
 }
 
-function decision(kind, id, status, reason = "") {
-  const store = reviewStore();
+export function decision(kind, id, status, reason = "", filename = reviewPath) {
+  const store = reviewStore(filename);
+  // A late expiry must not erase the record that a push was already delivered.
   try { store.prepare(`INSERT INTO decisions VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(kind,id) DO UPDATE SET status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at`)
+    ON CONFLICT(kind,id) DO UPDATE SET status=excluded.status, reason=excluded.reason, updated_at=excluded.updated_at
+    WHERE NOT (decisions.status = 'promoted' AND excluded.status = 'expired')`)
     .run(kind, id, status, reason.slice(0, 300), new Date().toISOString()); }
   finally { store.close(); }
 }
@@ -44,7 +46,13 @@ function reviewed(kind) {
 
 export const MAX_AUTHENTICATED_PUSH_TTL_MS = 2 * 60 * 60 * 1000;
 
-export function intake(name, filename = intakePath, terminal = new Set()) {
+/** A queued collective push older than its maximum lifetime (plus clock slack) can never be delivered. */
+export const PUSH_QUEUE_EXPIRY_MS = MAX_AUTHENTICATED_PUSH_TTL_MS + 10 * 60_000;
+export function pushQueueExpired(row, at = Date.now()) {
+  return isCollectivePush(row.name) && at - Date.parse(row.queued_at) > PUSH_QUEUE_EXPIRY_MS;
+}
+
+export function intake(name, filename = intakePath, terminal = new Set(), at = Date.now()) {
   if (!fs.existsSync(filename)) return name ? undefined : [];
   const store = new DatabaseSync(filename, { readOnly: true });
   try {
@@ -53,7 +61,8 @@ export function intake(name, filename = intakePath, terminal = new Set()) {
       : store.prepare("SELECT name, queued_at FROM drafts WHERE reviewed_at IS NULL AND name = ?").get(name);
     const selected = [];
     for (const row of store.prepare("SELECT name, queued_at FROM drafts WHERE reviewed_at IS NULL ORDER BY queued_at, name").iterate()) {
-      if (!terminal.has(row.name)) selected.push(row);
+      // Expired pushes are dropped so they cannot crowd ordinary community drafts out of the window.
+      if (!terminal.has(row.name) && !pushQueueExpired(row, at)) selected.push(row);
     }
     return selected.sort((a, b) => Number(isCollectivePush(b.name)) - Number(isCollectivePush(a.name))).slice(0, 40);
   } finally { store.close(); }
@@ -173,6 +182,33 @@ async function duplicateInventory(url) {
   return matches;
 }
 
+/**
+ * State of a curator-authored WM subject: "absent", "match" (exactly the expected quads, ignoring the
+ * volatile observedAt time), or "mismatch". A mismatching pre-existing subject must never be shared.
+ */
+async function curatorSubjectState(subject, quads) {
+  const result = await request("/api/query", { contextGraphId: graph, view: "working-memory",
+    sparql: `SELECT ?p ?o WHERE { <${subject}> ?p ?o } LIMIT 101` });
+  const bindings = result?.result?.bindings || result?.bindings;
+  if (!Array.isArray(bindings) || bindings.length > 100) throw new Error("WM subject read unavailable; no promotion allowed");
+  if (bindings.length === 0) return "absent";
+  const volatile = `${ns}observedAt`;
+  const key = (predicate, object) => `${predicate}\u0000${term(object)}`;
+  const actual = new Set(bindings.map((row) => [row.p?.value || row.p, row.o]).filter(([p]) => p !== volatile).map(([p, o]) => key(p, o)));
+  const expected = new Set(quads.filter((q) => q.predicate !== volatile).map((q) => key(q.predicate, q.object)));
+  if (actual.size !== expected.size) return "mismatch";
+  for (const item of expected) if (!actual.has(item)) return "mismatch";
+  return "match";
+}
+
+/** Writes the curator-authored quads unless an identical draft exists; refuses to share anything else. */
+async function ensureCuratorDraft(name, subject, quads) {
+  const before = await curatorSubjectState(subject, quads);
+  if (before === "mismatch") throw new Error(`pre-existing WM subject ${name} is not curator-authored; refusing to share`);
+  if (before === "absent") await request("/api/knowledge-assets", { contextGraphId: graph, name, finalize: false, alsoShareSwm: false, quads });
+  if (await curatorSubjectState(subject, quads) !== "match") throw new Error(`WM draft ${name} not verified as curator-authored; refusing to share`);
+}
+
 async function main() {
   const [action, id] = process.argv.slice(2);
   if (action === "list") {
@@ -211,9 +247,6 @@ async function main() {
     if (!Array.isArray(bindings) || bindings.length >= 100) throw new Error("incomplete WM draft read");
     const source = bindings.find((item) => (item.p?.value || item.p) === "https://schema.org/url");
     const url = source?.o?.value || source?.o;
-    const duplicates = url ? await duplicateInventory(url) : [];
-    console.log(JSON.stringify({ name: id, quads: bindings.map((row) => ({ predicate: row.p?.value || row.p, object: term(row.o) })), canonicalUrl: url ? canonicalUrl(url) : null, duplicates: duplicateEvidence(duplicates) }));
-    if (action === "community") return;
     const publisher = bindings.find((item) => (item.p?.value || item.p) === "https://schema.org/publisher");
     const comment = bindings.find((item) => (item.p?.value || item.p) === "http://www.w3.org/2000/01/rdf-schema#comment");
     const field = (predicate) => { const row = bindings.find((item) => (item.p?.value || item.p) === predicate); return term(row?.o); };
@@ -223,9 +256,28 @@ async function main() {
     const angle = field(`${ns}proposedAngle`);
     const text = term(comment?.o) || "";
     const isPush = isCollectivePush(id);
+    // Cheap validity/expiry check before any inventory query. A push that can never be delivered
+    // (expired, bad dates, bad target) gets a terminal decision and leaves the queue.
+    let pushTarget = null;
+    if (isPush && action === "promote-community") {
+      try {
+        pushTarget = validateCollectivePush({ name: id, url, postId, issuedAt, expiresAt, publisher: term(publisher?.o), angle, text });
+      } catch (error) {
+        const reason = String(error.message || error);
+        decision("community", id, /expired/.test(reason) ? "expired" : "rejected", reason);
+        const store = new DatabaseSync(intakePath);
+        try { store.prepare("UPDATE drafts SET reviewed_at = ? WHERE name = ? AND queued_at = ? AND reviewed_at IS NULL").run(new Date().toISOString(), id, queued.queued_at); }
+        finally { store.close(); }
+        console.log(JSON.stringify({ rejected: id, terminal: true, reason }));
+        return;
+      }
+    }
+    const duplicates = url ? await duplicateInventory(url) : [];
+    console.log(JSON.stringify({ name: id, quads: bindings.map((row) => ({ predicate: row.p?.value || row.p, object: term(row.o) })), canonicalUrl: url ? canonicalUrl(url) : null, duplicates: duplicateEvidence(duplicates) }));
+    if (action === "community") return;
     const draftSubject = `https://www.dkgswarm.com/ka/${id}`;
     if (!isPush && (!url || !publisher || typeof text !== "string" || text.length < 40 || competingDrafts(duplicates, draftSubject).length)) throw new Error("community source, publisher, substantive text and unique URL required");
-    const canonical = isPush ? validateCollectivePush({ name: id, url, postId, issuedAt, expiresAt, publisher: term(publisher?.o), angle, text }) : canonicalUrl(url);
+    const canonical = isPush ? pushTarget : canonicalUrl(url);
     if (!isPush && !/^https:\/\/x\.com\/i\/status\/\d+$/.test(canonical)) throw new Error("community post requires X post URL");
     const name = `${isPush ? "curator-push-" : "curator-"}${id.toLowerCase()}`.slice(0, 80);
     const subject = `https://www.dkgswarm.com/ka/${name}`;
@@ -242,7 +294,7 @@ async function main() {
       console.log(JSON.stringify({ promoted: name, recovered: true }));
       return;
     }
-    if (!current.some((item) => (item.s?.value || item.s) === subject)) await request("/api/knowledge-assets", { contextGraphId: graph, name, finalize: false, alsoShareSwm: false, quads: [
+    await ensureCuratorDraft(name, subject, [
       quad(subject, rdfType, `${ns}${isPush ? "CollectivePush" : "CommunityEvidence"}`),
       ...(isPush ? [quad(subject, `${ns}targetPost`, canonical)] : [quad(subject, "https://schema.org/url", canonical), quad(subject, `${ns}canonicalUrl`, canonical)]),
       quad(subject, `${ns}publisher`, lit(term(publisher.o))),
@@ -255,7 +307,7 @@ async function main() {
       quad(subject, "https://schema.org/expires", lit(expiresAt)),
       quad(subject, `${ns}proposedAngle`, lit(angle)),
       quad(subject, `${ns}derivedFrom`, `https://www.dkgswarm.com/ka/${id}`),
-    ] });
+    ]);
     let shared;
     try { shared = await request(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: graph }); }
     catch (error) {
@@ -293,7 +345,7 @@ async function main() {
   const current = await duplicateInventory(url);
   if (current.some((item) => item.view === "shared-working-memory")) throw new Error("duplicate appeared during review");
   if (current.some((item) => item.view === "working-memory" && ![subject, `https://x.com/i/status/${id}`].includes(item.s?.value || item.s))) throw new Error("competing WM draft; review before promotion");
-  if (!current.some((item) => (item.s?.value || item.s) === subject)) await request("/api/knowledge-assets", { contextGraphId: graph, name, quads, finalize: false, alsoShareSwm: false });
+  await ensureCuratorDraft(name, subject, quads);
   const shared = await request(`/api/knowledge-assets/${name}/swm/share`, { contextGraphId: graph });
   if (!(await duplicateInventory(url)).some((item) => item.view === "shared-working-memory" && (item.s?.value || item.s) === subject)) throw new Error("SWM share not queryable");
   decision("x", id, "promoted");
