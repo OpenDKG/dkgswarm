@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 export function assertReadSparql(sparql) {
   const s = String(sparql || "").trim();
   if (!s || s.length > 4096) throw new Error("SPARQL missing or exceeds 4096 characters");

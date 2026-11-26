@@ -1,0 +1,25 @@
+DKG Swarm
+Copyright (C) 2026 The DKG Swarm contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+Earlier versions: from commit cdc8032 (2026-11-08) until this change, DKG Swarm was released
+under the MIT License, Copyright (c) 2025 BRX. Those versions stay available under the MIT
+License. The MIT copyright and permission notice, and the ISC notice for the contribution
+merged in pull request #1, are preserved in THIRD_PARTY_NOTICES.md.
+
+Repository: https://github.com/OpenDKG/dkgswarm
+
+Third-party components and their licenses are listed in THIRD_PARTY_NOTICES.md.
+Authors and contributors are listed in AUTHORS.md.

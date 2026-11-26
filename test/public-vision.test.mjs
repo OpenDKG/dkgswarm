@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -46,15 +47,22 @@ test('OpenDKG references point to the public organization and local integration 
   assert.match(read('README.md'), /docs\/opendkg-umbrella\.md/);
 });
 
-test('project license is declared consistently as MIT with a root LICENSE', () => {
-  const license = read('LICENSE');
-  assert.match(license, /^MIT License/);
-  assert.match(license, /Copyright \(c\) 2025 BRX/);
+test('project license is declared consistently as GPL-3.0-or-later', () => {
+  assert.match(read('LICENSE'), /GNU GENERAL PUBLIC LICENSE\s+Version 3, 29 June 2007/);
+  assert.match(read('NOTICE'), /either version 3 of the License, or\s+\(at your option\) any later version/);
   for (const file of ['package.json', 'collector/package.json']) {
-    assert.equal(JSON.parse(read(file)).license, 'MIT', file);
+    assert.equal(JSON.parse(read(file)).license, 'GPL-3.0-or-later', file);
   }
-  assert.equal(JSON.parse(read('package-lock.json')).packages[''].license, 'MIT');
-  assert.equal(JSON.parse(read('collector/package-lock.json')).packages[''].license, 'MIT');
+  for (const file of ['package-lock.json', 'collector/package-lock.json']) {
+    assert.equal(JSON.parse(read(file)).packages[''].license, 'GPL-3.0-or-later', file);
+  }
+});
+
+test('the earlier MIT notice stays with the project', () => {
+  assert.match(read('NOTICE'), /Copyright \(c\) 2025 BRX/);
+  const notices = read('THIRD_PARTY_NOTICES.md');
+  assert.match(notices, /Those versions stay available under it/);
+  assert.match(notices, /MIT License\s+Copyright \(c\) 2025 BRX\s+Permission is hereby granted/);
 });
 
 test('current repository pointers use the OpenDKG namespace', () => {

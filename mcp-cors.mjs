@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 // Origin policy for the MCP endpoint. Browsers send Origin on cross-origin requests;
 // non-browser clients usually send none. Only configured origins are reflected.
 const DEFAULT_ORIGINS = [

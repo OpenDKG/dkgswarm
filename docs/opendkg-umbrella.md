@@ -4,7 +4,7 @@
 
 This document records the OpenDKG affiliation and the owner-authorized repository move to `OpenDKG/dkgswarm`. DKGSwarm keeps its existing OriginTrail, TRAC, and Umanitek mission, project leadership, domain, accounts, graph scope, and deploy authority. The repository transfer is complete; no runtime, funding, policy, or further governance change is made by this document.
 
-Decision basis (2026-11-08): the owner (`brxtrac`) approved the `OpenDKG/dkgswarm` target and repository move and selected MIT as this project's license. The target was unclaimed before the move; transfer completed to repository id `1391410974` at `main` `70b2cb2e408b1b00e167b01aee5fee4dfef3c896` (PR #3). The provenance and governance review is recorded in PR #3 and `THIRD_PARTY_NOTICES.md`.
+Decision basis (2026-11-08): the owner (`brxtrac`) approved the `OpenDKG/dkgswarm` target and repository move and selected MIT as this project's license. The target was unclaimed before the move; transfer completed to repository id `1391410974` at `main` `70b2cb2e408b1b00e167b01aee5fee4dfef3c896` (PR #3). The provenance and governance review is recorded in PR #3 and `THIRD_PARTY_NOTICES.md`. On 2026-11-26 the project license changed to GPL-3.0-or-later (`docs/LICENSING.md`); other MIT statements dated before then record the earlier decision.
 
 | Field | Value |
 | --- | --- |
@@ -34,11 +34,11 @@ The following was checked directly on 2026-11-07 and rechecked where noted on 20
 | GitHub repository | Public, not a fork, not archived, default branch `main`, latest commit `70b2cb2` (2026-11-08 merge of PR #3). Repository id `1391410974`, unchanged by the move. |
 | Repository custody | `OpenDKG/dkgswarm`; old `brxtrac/dkgswarm` returns HTTP 301 to the new namespace. |
 | Post-transfer access | Organization default repository permission is `admin`, so current organization members receive admin on this public repository. This was not changed here; it is an existing organization setting. |
-| License metadata | MIT is this project's selected license: root `LICENSE` (`Copyright (c) 2025 BRX`), root and collector package metadata, and the root lockfile entry all declare MIT. `THIRD_PARTY_NOTICES.md` preserves the merged PR #1 contribution's original ISC basis, observed git attribution (`DeFine`), and affected files; the owner's MIT license does not relicense that contribution. Bundled third-party names, logos, and media keep their own terms. |
+| License metadata | GPL-3.0-or-later since 2026-11-26, the same as `OpenDKG/Axiom`: root `LICENSE` and `NOTICE`, root and collector package metadata, and both lockfile root entries. Releases from 2026-11-08 until then were MIT (`Copyright (c) 2025 BRX`) and stay available under MIT; that notice and the merged PR #1 contribution's original ISC basis, observed git attribution (`DeFine`) and affected files are preserved in `THIRD_PARTY_NOTICES.md`; the project license does not relicense that contribution. Bundled third-party names, logos, and media keep their own terms. See `docs/LICENSING.md`, including the open rights-holder confirmation. |
 | CI | One workflow, `.github/workflows/ci.yml`, runs root and collector tests on Node.js 22 and 24. No deployment workflow. |
 | Branch protection | `main` requires the `test (22)`, `test (24)`, and `ai-review/evidence` checks; strict checks; no force-push or deletion; admins included; zero required approving reviews. |
 | Issue/PR state | No open issues; three merged pull requests, including one external contribution (PR #1). |
-| Repository guidance and automation | README, MIT `LICENSE`, and `THIRD_PARTY_NOTICES.md`; no `AGENTS.md`, `CONTRIBUTING`, issue templates, `SECURITY.md`, `CODEOWNERS`, Dependabot configuration, GitHub Pages site, or discussions. No issue-support automation was found. |
+| Repository guidance and automation | README, GPL-3.0-or-later `LICENSE`, and `THIRD_PARTY_NOTICES.md`; no `AGENTS.md`, `CONTRIBUTING`, issue templates, `SECURITY.md`, `CODEOWNERS`, Dependabot configuration, GitHub Pages site, or discussions. No issue-support automation was found. |
 | Live join page | `https://www.dkgswarm.com/join` returned HTTP 200. |
 | MCP endpoint | `https://www.dkgswarm.com/mcp` returned HTTP 401 without a token, as expected. |
 | OAuth protected resource | `resource: https://www.dkgswarm.com/mcp`; scopes `dkg:read` and `dkg:write`. |
@@ -233,7 +233,7 @@ Release gates remain separate: the §3 provenance and governance review, license
 | D-001 | Integration status | DKGSwarm is an OpenDKG project serving as the front-facing community marketing, discovery, and coordination layer for OpenDKG apps. | Completed repository move; no content endorsement | This document; no OpenDKG, OriginTrail, TRAC, or Umanitek endorsement claimed. |
 | D-002 | Project autonomy | DKGSwarm keeps project leadership, domain, accounts, graph, and deploy authority; GitHub repository ownership follows D-003. | Owner-confirmed | Recorded here. |
 | D-003 | Repository shape | Transferred to `OpenDKG/dkgswarm`; no monorepo copy. | Completed 2026-11-08 | Repository id `1391410974`; old namespace redirects. |
-| D-004 | License and IP | MIT for this project's work; root `LICENSE`, package metadata, and lockfile aligned; merged PR #1 contribution's ISC basis and third-party notices preserved in `THIRD_PARTY_NOTICES.md`. | Decided by owner; rights-holder/asset list still open | Owner selected MIT; no retroactive MIT claim over the external contribution. |
+| D-004 | License and IP | Superseded 2026-11-26: GPL-3.0-or-later (`docs/LICENSING.md`). Earlier record: MIT for this project's work; root `LICENSE`, package metadata, and lockfile aligned; merged PR #1 contribution's ISC basis and third-party notices preserved in `THIRD_PARTY_NOTICES.md`. | Decided by owner; rights-holder/asset list still open | Owner selected MIT; no retroactive MIT claim over the external contribution. |
 | D-005 | Domain and website | Keep `dkgswarm.com` and the current site unless a separate migration is approved. | Open | Custody, DNS, TLS, and redirects must be named. |
 | D-006 | Donations and funds | Project donations stay separate from umbrella funds; no equal split assumed; publish rules before new umbrella/shared funding. Existing project donations remain independent. | Proposed policy | No umbrella treasury or Open Collective is created. |
 | D-007 | Context graph | Owner chooses whether broader OpenDKG topics extend `trac-marketing` or use a separate graph; either needs separate design and opt-in. | Not implemented | No graph created, joined, or renamed. |
@@ -261,7 +261,7 @@ Now that the repository is OpenDKG-owned, the adopted Contributor Agreement cove
 ## 9. Blockers and owner questions
 
 1. **Source deployment:** repository reconciliation is complete for the tracked application files; the host deployment lags canonical `main`. Follow [`deployment.md`](deployment.md), then record the deployed SHA. Remaining decision: when the operator approves a restart/copy window, and whether generated site previews are regenerated as part of it.
-2. **License:** resolved — the owner selected MIT and the root `LICENSE` and package metadata are aligned. Open; confirm notices for bundled third-party media and record the merged external contribution's provenance without claiming a retroactive assignment.
+2. **License:** resolved — the owner selected MIT and the root `LICENSE` and package metadata are aligned. Open; confirm notices for bundled third-party media and record the merged external contribution's provenance without claiming a retroactive assignment. Update 2026-11-26: the license is now GPL-3.0-or-later (`docs/LICENSING.md`).
 3. **Target and review evidence:** resolved. `OpenDKG/dkgswarm` is the canonical repository; the §3 provenance and governance review is recorded in PR #3 and `THIRD_PARTY_NOTICES.md`; no separate council transfer vote is stated in the adopted text.
 4. **Affiliation vs transfer:** resolved. The owner chose and completed the repository transfer.
 5. **Domain, website, Open Collective:** who holds custody, and are any of these in scope now? This draft assumes they remain separate.

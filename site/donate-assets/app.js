@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 function setStatus(message) {
   const statusText = document.getElementById("status-text");
   if (statusText) {

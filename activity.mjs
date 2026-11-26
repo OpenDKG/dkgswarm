@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later AND ISC
+// Contains an ISC-licensed contribution; see THIRD_PARTY_NOTICES.md.
 import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 

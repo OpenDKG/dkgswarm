@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
 /* Match DKG Swarm pixel identity while keeping memory-map layout. */
 :root{--bg:#07070a;--panel:#12111b;--line:#383047;--ink:#e6e6e6;--dim:#abb0bd;--mint:#7cff6b;--coral:#ffcf5c;--blue:#43b6ff;--mono:'IBM Plex Mono',monospace;--display:'Press Start 2P',monospace;--body:'IBM Plex Sans',sans-serif}
 body{background:radial-gradient(1000px 520px at 48% 0%,#43b6ff23,transparent 70%),radial-gradient(800px 400px at 15% 35%,#7cff6b15,transparent 65%),var(--bg)}

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 const HEALTH_COPY = {
   green: { home: 'Context 01 live', live: 'Available now', directory: 'LIVE NOW' },
   yellow: { home: 'Context 01 delayed: catching up', live: 'Catching up', directory: 'CATCHING UP' },

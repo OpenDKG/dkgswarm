@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 const BASE = "https://www.dkgswarm.com/ka/";
 const NS = "https://www.dkgswarm.com/ontology/curator/";
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";

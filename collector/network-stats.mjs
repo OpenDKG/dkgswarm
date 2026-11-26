@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
 const DASHBOARD_UUID = "b933de89-fc08-4dc5-824f-d53e8c8f94c3";
 const OTHUB = "https://othub.io";
 const STAKING = "https://staking.origintrail.io";
