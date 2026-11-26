@@ -52,7 +52,7 @@ export async function routeDraft(name, { enqueue = enqueueCuratorDraft, deliver 
 /** Safety cap in addition to the expiry window; a push older than its lifetime is never retried. */
 export const MAX_PUSH_DELIVERY_ATTEMPTS = 150;
 
-export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = deliverCollectivePush, at = Date.now(), reviewFilename } = {}) {
+export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = deliverCollectivePush, at = Date.now(), reviewFilename, onSnapshot } = {}) {
   if (!fs.existsSync(filename)) return;
   const db = new DatabaseSync(filename);
   let names;
@@ -64,16 +64,26 @@ export async function retryCollectivePushes({ filename = INTAKE_PATH, deliver = 
     const pending = db.prepare("SELECT name, queued_at, delivery_attempts FROM drafts WHERE reviewed_at IS NULL ORDER BY COALESCE(delivery_attempt_at, ''), queued_at").all()
       .filter((row) => isCollectivePush(row.name));
     // Expired or exhausted pushes become terminal here and are never retried again.
-    const retire = db.prepare("UPDATE drafts SET reviewed_at = ? WHERE name = ? AND reviewed_at IS NULL");
+    // Matches only the row as it was read: not one reviewed or queued again since.
+    const retire = db.prepare("UPDATE drafts SET reviewed_at = ? WHERE name = ? AND queued_at = ? AND reviewed_at IS NULL");
+    onSnapshot?.();
     const live = [];
     for (const row of pending) {
       const reason = pushQueueExpired(row, at) ? "collective push exceeded its queue lifetime"
         : row.delivery_attempts >= MAX_PUSH_DELIVERY_ATTEMPTS ? "collective push reached the delivery attempt cap" : null;
       if (!reason) { live.push(row); continue; }
-      // Audit first. If it cannot be written, the row stays queued (and undelivered) for the next run.
-      try { decision("community", row.name, "expired", reason, reviewFilename); }
-      catch (error) { console.error("collective push retirement not recorded", row.name, error.message); continue; }
-      retire.run(new Date(at).toISOString(), row.name);
+      // The audit row is written only if this run retires the push. If it cannot be written,
+      // the retirement rolls back and the row stays queued (and undelivered) for the next run.
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        if (retire.run(new Date(at).toISOString(), row.name, row.queued_at).changes === 1) {
+          decision("community", row.name, "expired", reason, reviewFilename);
+        }
+        db.exec("COMMIT");
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch {} // BEGIN itself may have failed.
+        console.error("collective push retirement not recorded", row.name, error.message);
+      }
     }
     names = live.slice(0, 10);
     const attempted = db.prepare("UPDATE drafts SET delivery_attempt_at = ?, delivery_attempts = delivery_attempts + 1 WHERE name = ?");

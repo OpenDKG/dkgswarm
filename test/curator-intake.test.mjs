@@ -179,3 +179,51 @@ test("a push is not retired or delivered while its audit decision cannot be writ
     assert.ok(queued());
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+for (const [label, promotedDecision] of [["before its audit row exists", false], ["with its audit row", true]]) {
+  test(`a push promoted between the snapshot and retirement (${label}) gets no expired audit row`, async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-race-"));
+    const filename = path.join(dir, "intake.sqlite");
+    const reviewFilename = path.join(dir, "review.sqlite");
+    try {
+      enqueueCuratorDraft("collective-push-raced", { filename });
+      decision("community", "unrelated", "rejected", "creates the table", reviewFilename);
+      const promotedAt = "2026-01-01T00:00:00.000Z";
+      await retryCollectivePushes({
+        filename, reviewFilename, at: Date.now() + 3 * 3600000,
+        deliver: async () => assert.fail("an expired push is never delivered"),
+        onSnapshot: () => {
+          const db = new DatabaseSync(filename);
+          db.prepare("UPDATE drafts SET reviewed_at = ? WHERE name = ?").run(promotedAt, "collective-push-raced");
+          db.close();
+          if (promotedDecision) decision("community", "collective-push-raced", "promoted", "", reviewFilename);
+        },
+      });
+      assert.deepEqual(decisions(reviewFilename).filter((row) => row.id === "collective-push-raced").map((row) => row.status),
+        promotedDecision ? ["promoted"] : []);
+      const db = new DatabaseSync(filename);
+      try { assert.equal(db.prepare("SELECT reviewed_at FROM drafts").get().reviewed_at, promotedAt); }
+      finally { db.close(); }
+    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+test("a push queued again between the snapshot and retirement is left queued", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-requeue-"));
+  const filename = path.join(dir, "intake.sqlite");
+  const reviewFilename = path.join(dir, "review.sqlite");
+  try {
+    enqueueCuratorDraft("collective-push-again", { filename });
+    const db = new DatabaseSync(filename);
+    db.prepare("UPDATE drafts SET queued_at = ?").run(new Date(Date.now() - 3 * 3600000).toISOString());
+    db.close();
+    await retryCollectivePushes({
+      filename, reviewFilename, deliver: async () => assert.fail("not part of this run"),
+      onSnapshot: () => enqueueCuratorDraft("collective-push-again", { filename }),
+    });
+    const check = new DatabaseSync(filename);
+    try { assert.equal(check.prepare("SELECT reviewed_at FROM drafts").get().reviewed_at, null); }
+    finally { check.close(); }
+    assert.equal(fs.existsSync(reviewFilename), false);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
