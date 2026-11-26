@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { askTrue, canonicalUrl, validateCollectivePush, xPostQuads, intake, normalizeDraftName, isCollectivePush } from "../curator.mjs";
+import { askTrue, canonicalUrl, validateCollectivePush, xPostQuads, intake, normalizeDraftName, isCollectivePush, PUSH_QUEUE_EXPIRY_MS } from "../curator.mjs";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,8 +14,10 @@ test("explicit intake lookup reaches position 86 while review list stays bounded
   const filename = path.join(dir, "intake.sqlite");
   const db = new DatabaseSync(filename);
   db.exec("CREATE TABLE drafts (name TEXT PRIMARY KEY, queued_at TEXT, reviewed_at TEXT)");
-  for (let i = 0; i < 85; i++) db.prepare("INSERT INTO drafts VALUES (?, ?, NULL)").run(`draft-${i}`, String(i).padStart(3, "0"));
-  db.prepare("INSERT INTO drafts VALUES (?, '086', NULL)").run("collective-push-latest");
+  // Real, recent queue timestamps in insertion order (expired pushes are now filtered from the list).
+  const queuedAt = (i) => new Date(Date.now() - 3600000 + i * 1000).toISOString();
+  for (let i = 0; i < 85; i++) db.prepare("INSERT INTO drafts VALUES (?, ?, NULL)").run(`draft-${i}`, queuedAt(i));
+  db.prepare("INSERT INTO drafts VALUES (?, ?, NULL)").run("collective-push-latest", queuedAt(86));
   db.close();
   try {
     assert.equal(intake(undefined, filename).length, 40);
@@ -24,6 +26,20 @@ test("explicit intake lookup reaches position 86 while review list stays bounded
     assert.deepEqual(intake(undefined, filename, terminal).map((row) => row.name), ["collective-push-latest"]);
     assert.equal(intake("collective-push-latest", filename).name, "collective-push-latest");
     assert.equal(intake("missing", filename), undefined);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("50 expired collective pushes do not hide a queued community draft from the review list", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "curator-expired-"));
+  const filename = path.join(dir, "intake.sqlite");
+  const db = new DatabaseSync(filename);
+  db.exec("CREATE TABLE drafts (name TEXT PRIMARY KEY, queued_at TEXT, reviewed_at TEXT)");
+  const old = new Date(Date.now() - PUSH_QUEUE_EXPIRY_MS - 60000).toISOString();
+  for (let i = 0; i < 50; i++) db.prepare("INSERT INTO drafts VALUES (?, ?, NULL)").run(`collective-push-stale-${i}`, old);
+  db.prepare("INSERT INTO drafts VALUES (?, ?, NULL)").run("community-draft", new Date().toISOString());
+  db.close();
+  try {
+    assert.deepEqual(intake(undefined, filename).map((row) => row.name), ["community-draft"]);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -52,6 +68,7 @@ test("promotion confirms SWM, preserves provenance, audits and acknowledges only
   let visible = false;
   let confirm = false;
   let created;
+  let planted = null;
   let shareCount = 0;
   const ns = "https://www.dkgswarm.com/ontology/curator/";
   const fields = { "https://schema.org/url": "https://x.com/Author/status/123456789", "https://schema.org/publisher": "@Author",
@@ -65,6 +82,7 @@ test("promotion confirms SWM, preserves provenance, audits and acknowledges only
     let result = {};
     if (req.url === "/api/query") {
       if (body.sparql.startsWith("ASK")) result = { result: { value: visible } };
+      else if (body.sparql.includes("/ka/curator-push-")) result = { result: { bindings: (planted || created?.quads || []).map((q) => ({ p: q.predicate, o: q.object })) } };
       else if (body.sparql.startsWith("SELECT ?p")) result = { result: { bindings: Object.entries(fields).map(([p, o]) => ({ p, o })) } };
       else result = { result: { bindings: [] } };
     } else if (req.url === "/api/knowledge-assets") created = body;
@@ -79,6 +97,12 @@ test("promotion confirms SWM, preserves provenance, audits and acknowledges only
       TRAC_CURATOR_INTAKE: filename, TRAC_CURATOR_REVIEW: review },
   });
   try {
+    // A pre-existing WM subject under the curator's name that the curator did not author is never shared.
+    planted = [{ predicate: "http://www.w3.org/2000/01/rdf-schema#comment", object: JSON.stringify("planted content") }];
+    await assert.rejects(run(), /not curator-authored/);
+    assert.equal(shareCount, 0);
+    assert.equal(created, undefined);
+    planted = null;
     await assert.rejects(run(), /not queryable/);
     assert.equal(db.prepare("SELECT reviewed_at FROM drafts WHERE name = ?").get(name).reviewed_at, null);
     confirm = true;
@@ -123,7 +147,9 @@ test("community evidence promotion writes no empty push statements", async () =>
     const body = JSON.parse(raw);
     let result = {};
     if (req.url === "/api/query") {
-      const rows = body.sparql.startsWith("SELECT ?p") ? Object.entries(fields).map(([p, o]) => ({ p, o }))
+      // The curator's own subject is absent until written, then reads back as written.
+      const rows = body.sparql.includes("/ka/curator-community-") ? (created?.quads || []).map((q) => ({ p: q.predicate, o: q.object }))
+        : body.sparql.startsWith("SELECT ?p") ? Object.entries(fields).map(([p, o]) => ({ p, o }))
         : shared && body.view === "shared-working-memory" ? [{ s: created.quads[0].subject, o: fields["https://schema.org/url"] }] : [];
       result = { result: { bindings: rows } };
     } else if (req.url === "/api/knowledge-assets") created = body;

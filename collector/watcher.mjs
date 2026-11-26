@@ -1,13 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { parseHTML } from "linkedom";
-import { ClientTransaction } from "x-client-transaction-id";
 
-const PUBLIC_BEARER = process.env.WATCH_X_PUBLIC_BEARER || "";
-const USER_QUERY = "G3KGOASz96M-Qu0nwmGXNg";
-const TWEETS_QUERIES = ["9zyyd1hebl7oNWIPdA8HRw", "E3opETHurmVJflFsUBVuUQ"];
-const SEARCH_QUERIES = ["auLkqtmHqYEpRvflfvLhyQ", "Yw6L66Pw54NHKuq4Dp7b4Q", "KPSo2_UWdOMpPJwjhfT1Qg"];
+// X is read only through the official X API v2 with an app-only bearer token from the operator's own
+// X developer project (WATCH_X_API_BEARER). Without it, X collection is off. No guest tokens, internal
+// web-client endpoints, session cookies or client-transaction headers are used.
+const X_API_BASE = "https://api.x.com/2";
+const X_TWEET_FIELDS = "created_at,author_id,referenced_tweets,note_tweet";
 const NS = "https://www.dkgswarm.com/ontology/x/";
 const CURATOR_NS = "https://www.dkgswarm.com/ontology/curator/";
 const TRUSTED_PUSH_ACCOUNTS = ["DrevZiga", "BranaRakic", "umanitek", "origin_trail"];
@@ -17,32 +16,6 @@ const MAX_DKG_ATTEMPTS = 12;
 const RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const SCHEMA = "https://schema.org/";
 const XSD = "http://www.w3.org/2001/XMLSchema#";
-const FEATURES = {
-  rweb_tipjar_consumption_enabled: true,
-  responsive_web_graphql_exclude_directive_enabled: true,
-  verified_phone_label_enabled: false,
-  creator_subscriptions_tweet_preview_api_enabled: true,
-  responsive_web_graphql_timeline_navigation_enabled: true,
-  responsive_web_graphql_skip_user_profile_image_extensions_enabled: false,
-  communities_web_enable_tweet_community_results_fetch: true,
-  c9s_tweet_anatomy_moderator_badge_enabled: true,
-  articles_preview_enabled: true,
-  responsive_web_edit_tweet_api_enabled: true,
-  graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
-  view_counts_everywhere_api_enabled: true,
-  longform_notetweets_consumption_enabled: true,
-  responsive_web_twitter_article_tweet_consumption_enabled: true,
-  tweet_awards_web_tipping_enabled: false,
-  creator_subscriptions_quote_tweet_preview_enabled: false,
-  freedom_of_speech_not_reach_fetch_enabled: true,
-  standardized_nudges_misinfo: true,
-  tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
-  rweb_video_timestamps_enabled: true,
-  longform_notetweets_rich_text_read_enabled: true,
-  longform_notetweets_inline_media_enabled: true,
-  responsive_web_enhance_cards_enabled: false,
-};
-
 const now = () => new Date().toISOString();
 const lit = (value) => JSON.stringify(String(value ?? ""));
 const typed = (value, type) => `${lit(value)}^^<${XSD}${type}>`;
@@ -92,22 +65,36 @@ export function hasQueryContent(body) {
   return false;
 }
 
-export function extractScriptUrls(html) {
-  return [...new Set([...String(html || "").matchAll(/(?:src|href)=["'](https:\/\/abs\.twimg\.com\/responsive-web\/client-web\/[^"']+\.js)["']/g)]
-    .map((match) => match[1]))];
+/**
+ * Maps one X API v2 post (plus `includes.users`) to the collector's post shape. When an expected
+ * account is given, posts whose author id or username does not match are dropped.
+ */
+export function postFromXApi(tweet, usersById, expected = {}) {
+  const id = String(tweet?.id || "");
+  const author = usersById.get(String(tweet?.author_id || ""));
+  const screen = author?.username || "";
+  const text = String(tweet?.note_tweet?.text || tweet?.text || "");
+  if (!id || !text || !screen) return null;
+  if (expected.userId && String(tweet.author_id) !== String(expected.userId)) return null;
+  if (expected.screen && screen.toLowerCase() !== String(expected.screen).toLowerCase()) return null;
+  const refs = Array.isArray(tweet.referenced_tweets) ? tweet.referenced_tweets : [];
+  return {
+    post_id: id,
+    account: `@${screen}`,
+    post_url: `https://x.com/${screen}/status/${id}`,
+    summary: text.replace(/\s+/g, " ").trim(),
+    created_at: tweet.created_at || "",
+    isReply: refs.some((ref) => ref?.type === "replied_to"),
+    isRt: refs.some((ref) => ref?.type === "retweeted") || /^RT @/i.test(text),
+    authorVerified: Boolean(author && tweet.author_id),
+  };
 }
 
-export function extractOperationId(source, operationName) {
-  const escaped = String(operationName).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const patterns = [
-    new RegExp(`queryId\\s*:\\s*["']([^"']+)["'][^{}]{0,300}operationName\\s*:\\s*["']${escaped}["']`),
-    new RegExp(`operationName\\s*:\\s*["']${escaped}["'][^{}]{0,300}queryId\\s*:\\s*["']([^"']+)["']`),
-  ];
-  for (const pattern of patterns) {
-    const match = String(source || "").match(pattern);
-    if (match) return match[1];
-  }
-  return "";
+export function postsFromXApi(body, expected = {}) {
+  const usersById = new Map((body?.includes?.users || []).map((user) => [String(user.id), user]));
+  return (Array.isArray(body?.data) ? body.data : [])
+    .map((tweet) => postFromXApi(tweet, usersById, expected))
+    .filter(Boolean);
 }
 
 export function shouldSkipPost(post, sourceTier, skipReplies, skipRts) {
@@ -503,15 +490,15 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
   const dbPath = process.env.WATCH_DB || "/root/dkg-swarm-webhooks/data/watcher.sqlite";
   const detectionsPath = process.env.WATCH_DETECTIONS || "/root/dkg-swarm-webhooks/data/detections.jsonl";
   const graphId = process.env.DKG_PUBLIC_GRAPH_ID || "trac-marketing";
-  const xAuthToken = String(process.env.WATCH_X_AUTH_TOKEN || "").trim();
-  const xCt0 = String(process.env.WATCH_X_CT0 || "").trim();
-  const searchReady = Boolean(xAuthToken && xCt0);
+  const xApiBearer = String(process.env.WATCH_X_API_BEARER || "").trim();
+  const xApiReady = Boolean(xApiBearer);
+  const searchReady = xApiReady;
   const dkgApi = (process.env.DKG_API_URL || "http://127.0.0.1:9200").replace(/\/$/, "");
   const db = openStore(dbPath, seenPath, detectionsPath);
   const state = {
-    lastPoll: null, lastError: null, lastGuest: null, lastDkgReconcile: null,
+    lastPoll: null, lastError: null, lastDkgReconcile: null,
     lastSearch: null, cooldownUntil: null, pollCount: 0, searchCursor: 0,
-    detections: [], running: false, queueRunning: false, reconcileRunning: false, clientTransaction: null,
+    detections: [], running: false, queueRunning: false, reconcileRunning: false,
   };
 
   function supportAccounts() {
@@ -546,37 +533,15 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
     try { fs.appendFileSync(detectionsPath, `${JSON.stringify(row)}\n`); } catch {}
   }
 
-  async function guestToken() {
-    const response = await fetch("https://api.twitter.com/1.1/guest/activate.json", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${PUBLIC_BEARER}`, "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(12000),
-    });
-    const body = await response.json();
-    if (!body.guest_token) throw new Error("no guest token");
-    state.lastGuest = now();
-    return body.guest_token;
-  }
-
-  async function gql(route, params, guest, method = "GET", baseUrl = "https://api.twitter.com/graphql", extraHeaders = {}) {
-    const url = new URL(`${baseUrl}/${route}`);
-    if (method === "GET") {
-      for (const [key, value] of Object.entries(params)) url.searchParams.set(key, typeof value === "string" ? value : JSON.stringify(value));
-    }
+  async function xApi(pathname, params = {}) {
+    const url = new URL(`${X_API_BASE}${pathname}`);
+    for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
     const response = await fetch(url, {
-      method,
-      headers: {
-        Authorization: `Bearer ${PUBLIC_BEARER}`,
-        "x-guest-token": guest,
-        "User-Agent": "Mozilla/5.0",
-        ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
-        ...extraHeaders,
-      },
-      body: method === "POST" ? JSON.stringify(params) : undefined,
+      headers: { Authorization: `Bearer ${xApiBearer}`, "User-Agent": "dkgswarm-collector" },
       signal: AbortSignal.timeout(12000),
     });
     if (!response.ok) {
-      const error = new Error(`graphql ${response.status}`);
+      const error = new Error(`X API ${response.status}`);
       error.status = response.status;
       const retryAfter = Number(response.headers.get("retry-after") || 0);
       const resetAt = Number(response.headers.get("x-rate-limit-reset") || 0) * 1000;
@@ -586,177 +551,56 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
     return response.json();
   }
 
-  function searchAuthHeaders() {
-    return searchReady ? { Cookie: `auth_token=${xAuthToken}; ct0=${xCt0}`, "x-csrf-token": xCt0 } : {};
-  }
-
-  async function fetchXPage(url) {
-    return fetch(url, { headers: { "User-Agent": "Mozilla/5.0", ...searchAuthHeaders() }, signal: AbortSignal.timeout(12000) });
-  }
-
-  async function searchTransactionId(pathname, fresh = false) {
-    if (fresh || !state.clientTransaction) {
-      const response = await fetchXPage("https://x.com/home");
-      if (!response.ok) throw new Error(`X transaction page ${response.status}`);
-      state.clientTransaction = await ClientTransaction.create(parseHTML(await response.text()).window.document);
-    }
-    return state.clientTransaction.generateTransactionId("GET", pathname);
-  }
-
-  async function searchOperationId(forceRefresh = false) {
-    const cached = db.prepare("SELECT value, refreshed_at FROM runtime_metadata WHERE key = 'SearchTimeline'").get();
-    if (!forceRefresh && cached && Date.parse(cached.refreshed_at) > Date.now() - 24 * 3600000) return cached.value;
-    const page = await fetchXPage("https://x.com/explore");
-    if (!page.ok) throw new Error(`X operation page ${page.status}`);
-    const urls = extractScriptUrls(await page.text());
-    const ordered = [...urls.filter((url) => /\/main\.[^/]+\.js$/.test(url)), ...urls.filter((url) => !/\/main\.[^/]+\.js$/.test(url))];
-    for (const url of ordered) {
-      const response = await fetchXPage(url);
-      if (!response.ok) continue;
-      const queryId = extractOperationId(await response.text(), "SearchTimeline");
-      if (!queryId) continue;
-      db.prepare(`INSERT INTO runtime_metadata (key, value, refreshed_at) VALUES ('SearchTimeline', ?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value, refreshed_at = excluded.refreshed_at`).run(queryId, now());
-      return queryId;
-    }
-    if (cached) return cached.value;
-    throw new Error("SearchTimeline operation not found");
-  }
-
-  async function userId(screen, guest) {
+  async function userId(screen) {
     const key = screen.toLowerCase();
     const cached = db.prepare("SELECT user_id, refreshed_at FROM account_users WHERE account = ?").get(key);
     if (cached && Date.parse(cached.refreshed_at) > Date.now() - 7 * 24 * 3600000) return cached.user_id;
-    const data = await gql(`${USER_QUERY}/UserByScreenName`, { variables: { screen_name: screen, withSafetyModeUserFields: true } }, guest);
-    const id = data?.data?.user?.result?.rest_id;
+    const data = await xApi(`/users/by/username/${encodeURIComponent(screen)}`);
+    const id = data?.data?.id;
     if (!id) throw new Error(`no user id for ${screen}`);
     db.prepare(`INSERT INTO account_users (account, user_id, refreshed_at) VALUES (?, ?, ?)
       ON CONFLICT(account) DO UPDATE SET user_id = excluded.user_id, refreshed_at = excluded.refreshed_at`).run(key, id, now());
     return id;
   }
 
-  function tweetFromResult(result, fallbackScreen = "", expectedUserId = "") {
-    const legacy = result?.legacy || result?.tweet?.legacy || {};
-    const id = String(result?.rest_id || result?.tweet?.rest_id || legacy.id_str || "");
-    const core = result?.core?.user_results?.result || result?.tweet?.core?.user_results?.result || {};
-    const authorScreen = core?.legacy?.screen_name || core?.core?.screen_name;
-    const screen = authorScreen || fallbackScreen;
-    if (!id || !legacy.full_text || !screen) return null;
-    if (expectedUserId && (!core?.rest_id || String(core.rest_id) !== String(expectedUserId)
-      || !authorScreen || authorScreen.toLowerCase() !== fallbackScreen.toLowerCase()
-      || core?.legacy?.screen_name && core?.core?.screen_name
-        && core.legacy.screen_name.toLowerCase() !== core.core.screen_name.toLowerCase())) return null;
-    return {
-      post_id: id,
-      account: `@${screen}`,
-      post_url: `https://x.com/${screen}/status/${id}`,
-      summary: legacy.full_text.replace(/\s+/g, " ").trim(),
-      created_at: legacy.created_at || "",
-      isReply: Boolean(legacy.in_reply_to_status_id_str),
-       isRt: Boolean(result?.retweeted_status_result || legacy.retweeted_status_id_str) || /^RT @/i.test(legacy.full_text),
-       authorVerified: Boolean(core?.rest_id && authorScreen),
-    };
-  }
-
-  function parseTweets(data, screen, uid) {
-    const instructions = data?.data?.user?.result?.timeline_v2?.timeline?.instructions || [];
-    const posts = [];
-    let cursor = "";
-    for (const instruction of instructions) {
-      for (const entry of instruction.entries || []) {
-        if (entry?.content?.cursorType === "Bottom" && typeof entry.content.value === "string") cursor = entry.content.value;
-        const result = entry?.content?.itemContent?.tweet_results?.result;
-        if (!result) continue;
-        const post = tweetFromResult(result, screen, uid);
-        if (post && normalizeHandle(post.account).toLowerCase() === screen.toLowerCase()) posts.push(post);
-      }
-    }
-    return { posts, cursor };
-  }
-
-  async function fetchAccount(screen, guest) {
-    const uid = await userId(screen, guest);
+  async function fetchAccount(screen) {
+    const uid = await userId(screen);
     const trusted = trustedAccounts.some((account) => account.toLowerCase() === screen.toLowerCase());
     const posts = new Map();
-    const cursors = new Set();
+    const tokens = new Set();
     const cutoff = Date.now() - PUSH_WINDOW_MS - 2 * 60000;
-    let cursor = "";
+    let token = "";
     for (let page = 0; page < (trusted ? 3 : 1); page++) {
-      let lastError;
-      let result;
-      for (const queryId of TWEETS_QUERIES) {
-        try {
-          const data = await gql(`${queryId}/UserTweets`, {
-            variables: { userId: uid, count: 12, ...(cursor ? { cursor } : {}), includePromotedContent: false, withQuickPromoteEligibilityTweetFields: true, withVoice: true, withV2Timeline: true },
-            features: FEATURES,
-          }, guest);
-          result = parseTweets(data, screen, uid);
-          break;
-        } catch (error) { lastError = error; }
-      }
-      if (!result) throw lastError || new Error("UserTweets failed");
-      const newPosts = result.posts.filter((post) => !posts.has(post.post_id));
+      const data = await xApi(`/users/${encodeURIComponent(uid)}/tweets`, {
+        max_results: 12,
+        pagination_token: token,
+        "tweet.fields": X_TWEET_FIELDS,
+        expansions: "author_id",
+        "user.fields": "username",
+      });
+      const pagePosts = postsFromXApi(data, { userId: uid, screen });
+      const newPosts = pagePosts.filter((post) => !posts.has(post.post_id));
       for (const post of newPosts) posts.set(post.post_id, post);
       if (!trusted || !newPosts.length) break;
-      const timestamps = result.posts.map((post) => Date.parse(post.created_at));
+      const timestamps = pagePosts.map((post) => Date.parse(post.created_at));
       if (timestamps.length && timestamps.every((timestamp) => Number.isFinite(timestamp) && timestamp < cutoff)) break;
-      if (!result.cursor) {
-        if (result.posts.length >= 12) throw new Error(`missing Bottom cursor for ${screen}`);
-        break;
-      }
-      if (cursors.has(result.cursor)) break;
-      cursors.add(result.cursor);
-      cursor = result.cursor;
+      const next = data?.meta?.next_token;
+      if (!next || tokens.has(next)) break;
+      tokens.add(next);
+      token = next;
     }
     return [...posts.values()];
   }
 
-  function parseSearch(data) {
-    const posts = new Map();
-    const visit = (value) => {
-      if (!value || typeof value !== "object") return;
-      const post = tweetFromResult(value);
-      if (post) posts.set(post.post_id, post);
-      for (const child of Object.values(value)) visit(child);
-    };
-    visit(data?.data?.search_by_raw_query?.search_timeline?.timeline?.instructions || []);
-    return [...posts.values()];
-  }
-
-  async function fetchSearch(rawQuery, guest) {
-    let lastError;
-    let discovered = "";
-    try { discovered = await searchOperationId(false); } catch (error) { lastError = error; }
-    const tryIds = [];
-    for (const queryId of [discovered, ...SEARCH_QUERIES].filter(Boolean)) if (!tryIds.includes(queryId)) tryIds.push(queryId);
-    for (const baseUrl of ["https://x.com/i/api/graphql", "https://api.twitter.com/graphql"]) {
-      for (const queryId of tryIds) {
-        try {
-          const pathname = `${baseUrl === "https://x.com/i/api/graphql" ? "/i/api/graphql" : "/graphql"}/${queryId}/SearchTimeline`;
-          const transactionId = await searchTransactionId(pathname);
-          const data = await gql(`${queryId}/SearchTimeline`, {
-            variables: { rawQuery, count: 20, querySource: "typed_query", product: "Latest" },
-            features: FEATURES,
-            fieldToggles: { withArticleRichContentState: false },
-          }, guest, "GET", baseUrl, { ...searchAuthHeaders(), "x-client-transaction-id": transactionId, "x-twitter-active-user": "yes", "x-twitter-client-language": "en" });
-          return parseSearch(data);
-        } catch (error) { lastError = error; }
-      }
-    }
-    if (lastError?.status === 404) {
-      try {
-        const queryId = await searchOperationId(true);
-        const pathname = `/i/api/graphql/${queryId}/SearchTimeline`;
-        const transactionId = await searchTransactionId(pathname, true);
-        const data = await gql(`${queryId}/SearchTimeline`, {
-          variables: { rawQuery, count: 20, querySource: "typed_query", product: "Latest" },
-          features: FEATURES,
-          fieldToggles: { withArticleRichContentState: false },
-        }, guest, "GET", "https://x.com/i/api/graphql", { ...searchAuthHeaders(), "x-client-transaction-id": transactionId, "x-twitter-active-user": "yes", "x-twitter-client-language": "en" });
-        return parseSearch(data);
-      } catch (error) { lastError = error; }
-    }
-    throw lastError || new Error("SearchTimeline failed");
+  async function fetchSearch(rawQuery) {
+    const data = await xApi("/tweets/search/recent", {
+      query: rawQuery,
+      max_results: 20,
+      "tweet.fields": X_TWEET_FIELDS,
+      expansions: "author_id",
+      "user.fields": "username",
+    });
+    return postsFromXApi(data);
   }
 
   function persist(post, kind, classification, queue = true, trustedSource = false) {
@@ -857,6 +701,11 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
      let expected;
      try { expected = buildAssets(data.post, data.classification, data.observedAt)[stage === "raw-dkg" ? "raw" : "derived"].quads; }
      catch { return false; }
+     return expectedQuadsMatch(expected, ["working-memory", "shared-working-memory"]);
+   }
+
+   /** true when a view holds exactly `expected` for its subjects, false when not, null when unverifiable. */
+   async function expectedQuadsMatch(expected, views) {
       // Full rdf:type IRI inside VALUES is rejected by the scoped-query rewriter
       // ("unable to locate a graph-scopable WHERE block"). Prefixed rdf:type is accepted.
       const pairs = [...new Set(expected.map(({ subject, predicate }) =>
@@ -865,7 +714,7 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
       const token = loadToken();
        if (!token) return null;
        let unavailable = false;
-      for (const view of ["working-memory", "shared-working-memory"]) {
+      for (const view of views) {
         try {
           const response = await fetch(`${dkgApi}/api/query`, {
             method: "POST",
@@ -972,6 +821,10 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
     const token = loadToken();
     if (!token) throw new Error("no dkg token");
     if (!trustedPushEligible(post)) return;
+    // Never share a Working Memory subject by name alone: it must hold exactly the watcher-authored quads.
+    if (await expectedQuadsMatch(push.quads, ["working-memory"]) !== true) {
+      throw new Error(`collective push ${push.name} WM content is not the watcher-authored draft; not sharing`);
+    }
     const response = await fetch(`${dkgApi}/api/knowledge-assets/${push.name}/swm/share`, {
       method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ contextGraphId: graphId }), signal: AbortSignal.timeout(20000),
@@ -1055,7 +908,11 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
     state.running = true;
     const errors = [];
     try {
-      const guest = await guestToken();
+      if (!xApiReady) {
+        // Off by default: no official X API credential configured. DKG delivery still runs below.
+        state.lastError = "X collection disabled: set WATCH_X_API_BEARER (official X API v2 app-only token)";
+        return;
+      }
       const currentSupport = supportAccounts();
       const supportKeys = new Set(currentSupport.map((item) => item.toLowerCase()));
       const officialKeys = new Set(accounts.map((item) => item.toLowerCase()));
@@ -1063,7 +920,7 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
         try {
           const key = screen.toLowerCase();
           const kind = supportKeys.has(key) && !officialKeys.has(key) ? "support" : "official";
-          const posts = await fetchAccount(screen, guest);
+          const posts = await fetchAccount(screen);
           const seeded = db.prepare("SELECT 1 FROM seeded_accounts WHERE account = ?").get(screen.toLowerCase());
           const tier = sourceTier(screen);
           const collectsAll = tier === "approved-writer" || tier === "swarm-member";
@@ -1091,7 +948,7 @@ export function createWatcher({ fanout, log = console, getAdditionalAccounts = (
         const searchTier = state.searchCursor % searchQueries.length + 1;
         const rawQuery = searchQueries[searchTier - 1];
         try {
-          const posts = await fetchSearch(rawQuery, guest);
+          const posts = await fetchSearch(rawQuery);
           const seeded = db.prepare("SELECT 1 FROM seeded_searches WHERE search_key = ?").get(rawQuery);
           for (const post of posts) {
             if (shouldSkipPost(post, "discovery", skipReplies, skipRts)) continue;

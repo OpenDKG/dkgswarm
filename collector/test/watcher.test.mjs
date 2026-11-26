@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildAssets, buildTrustedPush, classifyPost, createWatcher as makeWatcher, dkgHealth, extractOperationId, extractScriptUrls, hasQueryContent, matchesDerivedQuads, isSharedAsset, isWorkingAsset, normalizeXHandle, openStore, shouldNotifyPost, shouldSkipPost, trustedPushEligible } from "../watcher.mjs";
+import { buildAssets, buildTrustedPush, classifyPost, createWatcher as makeWatcher, dkgHealth, hasQueryContent, postsFromXApi, matchesDerivedQuads, isSharedAsset, isWorkingAsset, normalizeXHandle, openStore, shouldNotifyPost, shouldSkipPost, trustedPushEligible } from "../watcher.mjs";
 
 const activeWatchers = [];
 const createWatcher = (options) => {
@@ -21,13 +21,59 @@ test("X handles are required, validated, and normalized", () => {
   }
 });
 
-test("current X bundle metadata can be discovered without fixed asset hashes", () => {
-  const html = `<script src="https://abs.twimg.com/responsive-web/client-web/main.abc123.js"></script>
-    <link rel="preload" as="script" href="https://abs.twimg.com/responsive-web/client-web/main.abc123.js">
-    <script src="https://example.com/ignored.js"></script>`;
-  assert.deepEqual(extractScriptUrls(html), ["https://abs.twimg.com/responsive-web/client-web/main.abc123.js"]);
-  assert.equal(extractOperationId('e.exports={queryId:"current-id",operationName:"SearchTimeline",operationType:"query"}', "SearchTimeline"), "current-id");
-  assert.equal(extractOperationId('e.exports={queryId:"wrong-id",operationName:"ListSearchTimeline",operationType:"query"}', "SearchTimeline"), "");
+test("official X API v2 posts map to collector posts and drop mismatched authors", () => {
+  const body = {
+    data: [
+      { id: "1", text: "Hello OriginTrail", created_at: "2026-11-20T10:00:00.000Z", author_id: "42" },
+      { id: "2", text: "reply", author_id: "42", referenced_tweets: [{ type: "replied_to", id: "9" }] },
+      { id: "3", text: "RT @someone: hi", author_id: "42", referenced_tweets: [{ type: "retweeted", id: "8" }] },
+      { id: "4", text: "impostor", author_id: "99" },
+      { id: "5", text: "no author" },
+      { id: "6", text: "short", note_tweet: { text: "long   note text" }, author_id: "42" },
+    ],
+    includes: { users: [{ id: "42", username: "DrevZiga" }, { id: "99", username: "Impostor" }] },
+  };
+  const posts = postsFromXApi(body, { userId: "42", screen: "DrevZiga" });
+  assert.deepEqual(posts.map((post) => post.post_id), ["1", "2", "3", "6"]);
+  assert.deepEqual(posts[0], { post_id: "1", account: "@DrevZiga", post_url: "https://x.com/DrevZiga/status/1",
+    summary: "Hello OriginTrail", created_at: "2026-11-20T10:00:00.000Z", isReply: false, isRt: false, authorVerified: true });
+  assert.equal(posts[1].isReply, true);
+  assert.equal(posts[2].isRt, true);
+  assert.equal(posts[3].summary, "long note text");
+  assert.deepEqual(postsFromXApi(body).map((post) => post.account), ["@DrevZiga", "@DrevZiga", "@DrevZiga", "@Impostor", "@DrevZiga"]);
+});
+
+test("X collection is off without an official API credential and never calls unofficial endpoints", async () => {
+  const sources = ["watcher.mjs", "server.mjs", "curator.mjs", "health-check.mjs", "network-stats.mjs", "package.json"]
+    .map((file) => fs.readFileSync(new URL(`../${file}`, import.meta.url), "utf8")).join("\n");
+  for (const banned of ["api.twitter.com/graphql", "x.com/i/api/graphql", "guest/activate", "x-client-transaction-id", "x-guest-token", "auth_token=", "ct0="]) {
+    assert.equal(sources.includes(banned), false, `collector must not reference ${banned}`);
+  }
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "x-watcher-off-"));
+  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "WATCH_X_API_BEARER"];
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const originalFetch = globalThis.fetch;
+  process.env.WATCH_DB = path.join(directory, "watcher.sqlite");
+  process.env.WATCH_SEEN = path.join(directory, "seen.json");
+  process.env.WATCH_DETECTIONS = path.join(directory, "detections.jsonl");
+  delete process.env.WATCH_X_API_BEARER;
+  const calls = [];
+  globalThis.fetch = async (input) => { calls.push(String(input)); throw new Error("unexpected"); };
+  try {
+    const watcher = createWatcher({ log: { info() {}, error() {} } });
+    watcher.start();
+    for (let i = 0; i < 100 && !watcher.status().lastError; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.match(watcher.status().lastError, /X collection disabled/);
+    assert.equal(calls.some((url) => /x\.com|twitter\.com/.test(url)), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("trusted direct push accepts only verified allowlisted originals and quotes within source window", () => {
@@ -232,7 +278,7 @@ test("only non-empty SPARQL results confirm durable content", () => {
 
 test("first seed queues fresh verified trusted pushes without historical WM; restart prioritizes trusted delivery", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "x-watcher-trusted-"));
-  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "DKG_API_TOKEN_FILE", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_AUTH_TOKEN", "WATCH_X_CT0", "WATCH_RETRY_MS"];
+  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "DKG_API_TOKEN_FILE", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_API_BEARER", "WATCH_RETRY_MS"];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const originalFetch = globalThis.fetch;
   const dbPath = path.join(directory, "watcher.sqlite");
@@ -241,40 +287,38 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
   process.env.WATCH_DETECTIONS = path.join(directory, "detections.jsonl");
   process.env.DKG_API_TOKEN_FILE = path.join(directory, "token");
   process.env.WATCH_SUPPORT_ACCOUNTS = "";
-  delete process.env.WATCH_X_AUTH_TOKEN;
-  delete process.env.WATCH_X_CT0;
+  process.env.WATCH_X_API_BEARER = "test-app-only-bearer";
   process.env.WATCH_RETRY_MS = "20";
   fs.writeFileSync(process.env.DKG_API_TOKEN_FILE, "test-token");
   let currentId = "123456789012345678";
   const oldId = "123456789012345677";
   const requests = [];
   const written = new Set();
+  const writtenQuads = new Map();
   const shared = new Set();
   const json = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, headers: new Headers() });
-  const result = (id, createdAt, screen = "DrevZiga", uid = "42") => ({ rest_id: id,
-    legacy: { full_text: "New update", created_at: createdAt },
-    core: { user_results: { result: { rest_id: uid, legacy: { screen_name: screen } } } } });
+  const result = (id, createdAt, authorId = "42") => ({ id, text: "New update", created_at: createdAt, author_id: authorId });
   globalThis.fetch = async (input, options = {}) => {
     const url = String(input);
-    if (url.endsWith("/guest/activate.json")) return json({ guest_token: "guest" });
-    if (url.includes("/UserByScreenName")) {
-      const screen = JSON.parse(new URL(url).searchParams.get("variables")).screen_name;
-      return json({ data: { user: { result: { rest_id: screen === "DrevZiga" ? "42" : "99" } } } });
+    if (url.startsWith("https://api.x.com/2/")) assert.equal(options.headers?.Authorization, "Bearer test-app-only-bearer");
+    if (url.includes("/2/users/by/username/")) {
+      const screen = decodeURIComponent(new URL(url).pathname.split("/").pop());
+      return json({ data: { id: screen === "DrevZiga" ? "42" : "99", username: screen } });
     }
-    if (url.includes("/UserTweets")) {
-      const uid = JSON.parse(new URL(url).searchParams.get("variables")).userId;
-      const entries = uid === "42" ? [result(oldId, new Date(Date.now() - 3600000).toUTCString()),
-        result(currentId, new Date(Date.now() - 60000).toUTCString()),
-        result("123456789012345680", new Date().toUTCString(), "Impostor"),
-        result("123456789012345681", new Date().toUTCString(), "DrevZiga", "99"),
-        { ...result("123456789012345682", new Date().toUTCString()), core: {} }] : [];
-      return json({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ entries: entries.map((tweet) =>
-        ({ content: { itemContent: { tweet_results: { result: tweet } } } })) }] } } } } } });
+    if (/\/2\/users\/[^/]+\/tweets/.test(url)) {
+      const uid = new URL(url).pathname.split("/")[3];
+      const data = uid === "42" ? [result(oldId, new Date(Date.now() - 3600000).toISOString()),
+        result(currentId, new Date(Date.now() - 60000).toISOString()),
+        result("123456789012345680", new Date().toISOString(), "77"),
+        result("123456789012345681", new Date().toISOString(), "99"),
+        result("123456789012345682", new Date().toISOString(), "")] : [];
+      return json({ data, includes: { users: [{ id: "42", username: "DrevZiga" }, { id: "77", username: "Impostor" }, { id: "99", username: "DrevZiga" }] }, meta: {} });
     }
     if (url.endsWith("/api/knowledge-assets")) {
       const name = JSON.parse(options.body).name;
       requests.push(name);
       written.add(name);
+      writtenQuads.set(name, JSON.parse(options.body).quads);
       return json({ memoryLayer: "WM" });
     }
     if (url.includes("/swm/share")) {
@@ -292,6 +336,12 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
     if (url.endsWith("/api/query")) {
       const body = JSON.parse(options.body);
        assert.doesNotMatch(body.sparql, /GRAPH\s*</);
+       const pushSubject = body.sparql.match(/<https:\/\/www\.dkgswarm\.com\/ka\/(collective-push-x-\d+)> rdf:type/)?.[1];
+       if (pushSubject && body.sparql.startsWith("PREFIX rdf:")) {
+         // Exact-content check before sharing: return what the watcher wrote for this push.
+         const quads = written.has(pushSubject) ? writtenQuads.get(pushSubject) : [];
+         return json({ result: { type: "bindings", bindings: quads.map(({ subject, predicate, object }) => ({ s: subject, p: predicate, o: object })) } });
+       }
        const id = body.sparql.match(/(?:classification\/|status\/)(\d+)|collective-push-x-(\d+)/)?.slice(1).find(Boolean);
        const name = body.sparql.includes("SocialMediaPosting") ? `raw-x-post-${id}`
          : body.sparql.includes("Classification") ? `x-insight-${id}` : `collective-push-x-${id}`;
@@ -347,34 +397,32 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
 
 test("trusted account pagination collects posts beyond first 12 with bounded requests", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "x-watcher-pages-"));
-  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_AUTH_TOKEN", "WATCH_X_CT0"];
+  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_API_BEARER"];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const originalFetch = globalThis.fetch;
   process.env.WATCH_DB = path.join(directory, "watcher.sqlite");
   process.env.WATCH_SEEN = path.join(directory, "seen.json");
   process.env.WATCH_DETECTIONS = path.join(directory, "detections.jsonl");
   process.env.WATCH_SUPPORT_ACCOUNTS = "";
-  delete process.env.WATCH_X_AUTH_TOKEN;
-  delete process.env.WATCH_X_CT0;
+  process.env.WATCH_X_API_BEARER = "test-app-only-bearer";
   const cursors = [];
   const json = (body) => ({ ok: true, status: 200, json: async () => body, headers: new Headers() });
   globalThis.fetch = async (input) => {
     const url = String(input);
-    if (url.endsWith("/guest/activate.json")) return json({ guest_token: "guest" });
-    if (url.includes("/UserByScreenName")) return json({ data: { user: { result: { rest_id: JSON.parse(new URL(url).searchParams.get("variables")).screen_name === "DrevZiga" ? "42" : "99" } } } });
-    if (url.includes("/UserTweets")) {
-      const { userId, cursor } = JSON.parse(new URL(url).searchParams.get("variables"));
-      if (userId !== "42") return json({ data: { user: { result: { timeline_v2: { timeline: { instructions: [] } } } } } });
+    if (url.includes("/2/users/by/username/")) {
+      const screen = decodeURIComponent(new URL(url).pathname.split("/").pop());
+      return json({ data: { id: screen === "DrevZiga" ? "42" : "99", username: screen } });
+    }
+    if (/\/2\/users\/[^/]+\/tweets/.test(url)) {
+      const parsed = new URL(url);
+      const userId = parsed.pathname.split("/")[3];
+      const cursor = parsed.searchParams.get("pagination_token");
+      if (userId !== "42") return json({ data: [], meta: {} });
       cursors.push(cursor || "");
       const start = cursor ? 13 : 1;
-      const entries = Array.from({ length: 12 }, (_, index) => {
-        const id = String(123456789000000000n + BigInt(start + index));
-        return { content: { itemContent: { tweet_results: { result: { rest_id: id,
-          legacy: { full_text: "Normal post", created_at: new Date(Date.now() - 60000).toUTCString() },
-          core: { user_results: { result: { rest_id: "42", legacy: { screen_name: "DrevZiga" } } } } } } } } };
-      });
-      entries.push({ content: { cursorType: "Bottom", value: "repeat-cursor" } });
-      return json({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ entries }] } } } } } });
+      const data = Array.from({ length: 12 }, (_, index) => ({ id: String(123456789000000000n + BigInt(start + index)),
+        text: "Normal post", created_at: new Date(Date.now() - 60000).toISOString(), author_id: "42" }));
+      return json({ data, includes: { users: [{ id: "42", username: "DrevZiga" }] }, meta: { next_token: "repeat-cursor" } });
     }
     throw new Error(`unexpected fetch ${url}`);
   };
@@ -396,23 +444,21 @@ test("trusted account pagination collects posts beyond first 12 with bounded req
 });
 
 test("trusted pagination stops on stale pages or no new posts, preserves out-of-order fresh posts, and rejects missing cursors", async () => {
-  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_AUTH_TOKEN", "WATCH_X_CT0"];
+  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_API_BEARER"];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const originalFetch = globalThis.fetch;
   const recent = new Date(Date.now() - 60000).toUTCString();
   const old = new Date(Date.now() - 40 * 60000).toUTCString();
   const skewed = new Date(Date.now() - 31 * 60000).toUTCString();
-  const tweet = (id, createdAt) => ({ content: { itemContent: { tweet_results: { result: {
-    rest_id: String(id), legacy: { full_text: "Normal post", created_at: createdAt },
-    core: { user_results: { result: { rest_id: "42", legacy: { screen_name: "DrevZiga" } } } },
-  } } } } });
+  const tweet = (id, createdAt) => ({ id: String(id), text: "Normal post", created_at: createdAt, author_id: "42" });
   const cases = [
     { name: "stale page", pages: [[tweet(1, old)], [tweet(2, recent)]], cursors: [""], seen: 1 },
     { name: "clock skew", pages: [[tweet(1, skewed)], [tweet(2, recent)]], cursors: ["", "next-1"], seen: 2 },
     { name: "pinned fresh post", pages: [[tweet(1, recent), tweet(2, old)], [tweet(3, recent)]], cursors: ["", "next-1"], seen: 3 },
     { name: "duplicate page", pages: [[tweet(1, recent)], [tweet(1, recent)], [tweet(2, recent)]], cursors: ["", "next-1"], seen: 1 },
     { name: "three-page cap", pages: [[tweet(1, recent)], [tweet(2, recent)], [tweet(3, recent)], [tweet(4, recent)]], cursors: ["", "next-1", "next-2"], seen: 3 },
-    { name: "missing cursor on full page", pages: [Array.from({ length: 12 }, (_, index) => tweet(index + 1, recent))], cursors: [""], seen: 0, error: /missing Bottom cursor/ },
+    // X API v2: an absent next_token is the documented end of the timeline, not an error.
+    { name: "no next_token on full page", pages: [Array.from({ length: 12 }, (_, index) => tweet(index + 1, recent))], cursors: [""], seen: 12, noCursor: true },
     { name: "short terminal page", pages: [[tweet(1, recent)]], cursors: [""], seen: 1, noCursor: true },
   ];
   try {
@@ -422,21 +468,23 @@ test("trusted pagination stops on stale pages or no new posts, preserves out-of-
       process.env.WATCH_SEEN = path.join(directory, "seen.json");
       process.env.WATCH_DETECTIONS = path.join(directory, "detections.jsonl");
       process.env.WATCH_SUPPORT_ACCOUNTS = "";
-      delete process.env.WATCH_X_AUTH_TOKEN;
-      delete process.env.WATCH_X_CT0;
+      process.env.WATCH_X_API_BEARER = "test-app-only-bearer";
       const cursors = [];
       const json = (body) => ({ ok: true, status: 200, json: async () => body, headers: new Headers() });
       globalThis.fetch = async (input) => {
         const url = String(input);
-        if (url.endsWith("/guest/activate.json")) return json({ guest_token: "guest" });
-        if (url.includes("/UserByScreenName")) return json({ data: { user: { result: { rest_id: JSON.parse(new URL(url).searchParams.get("variables")).screen_name === "DrevZiga" ? "42" : "99" } } } });
-        if (url.includes("/UserTweets")) {
-          const { userId, cursor } = JSON.parse(new URL(url).searchParams.get("variables"));
-          if (userId !== "42") return json({ data: { user: { result: { timeline_v2: { timeline: { instructions: [] } } } } } });
-          cursors.push(cursor || "");
-          const entries = [...(scenario.pages[cursors.length - 1] || [])];
-          if (!scenario.noCursor && !scenario.error && (cursors.length < scenario.pages.length || scenario.name === "three-page cap")) entries.push({ content: { cursorType: "Bottom", value: `next-${cursors.length}` } });
-          return json({ data: { user: { result: { timeline_v2: { timeline: { instructions: [{ entries }] } } } } } });
+        if (url.includes("/2/users/by/username/")) {
+          const screen = decodeURIComponent(new URL(url).pathname.split("/").pop());
+          return json({ data: { id: screen === "DrevZiga" ? "42" : "99", username: screen } });
+        }
+        if (/\/2\/users\/[^/]+\/tweets/.test(url)) {
+          const parsed = new URL(url);
+          if (parsed.pathname.split("/")[3] !== "42") return json({ data: [], meta: {} });
+          cursors.push(parsed.searchParams.get("pagination_token") || "");
+          const data = [...(scenario.pages[cursors.length - 1] || [])];
+          const meta = !scenario.noCursor && (cursors.length < scenario.pages.length || scenario.name === "three-page cap")
+            ? { next_token: `next-${cursors.length}` } : {};
+          return json({ data, includes: { users: [{ id: "42", username: "DrevZiga" }] }, meta });
         }
         throw new Error(`unexpected fetch ${url}`);
       };
