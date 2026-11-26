@@ -1,16 +1,29 @@
 // Fixed-window counters keyed by caller (IP, token family) plus one global key.
 export function createWindowLimiter({ windowMs, max, maxKeys = 10000 }) {
+  if (!Number.isSafeInteger(maxKeys) || maxKeys < 1) throw new RangeError("maxKeys must be a positive integer");
   const buckets = new Map();
+  let expiresNext = Infinity;
   return {
     take(key, now = Date.now()) {
       const bucket = buckets.get(key);
-      const current = !bucket || bucket.until <= now ? { count: 0, until: now + windowMs } : bucket;
-      if (current.count >= max) return false;
-      current.count += 1;
-      buckets.set(key, current);
-      if (buckets.size > maxKeys) {
-        for (const [k, v] of buckets) if (v.until <= now) buckets.delete(k);
+      if (bucket && bucket.until > now) {
+        if (bucket.count >= max) return false;
+        bucket.count += 1;
+        return true;
       }
+      if (!bucket && buckets.size === maxKeys) {
+        if (now < expiresNext) return false;
+        expiresNext = Infinity;
+        for (const [id, entry] of buckets) {
+          if (entry.until <= now) buckets.delete(id);
+          else expiresNext = Math.min(expiresNext, entry.until);
+        }
+        if (buckets.size === maxKeys) return false;
+      }
+      if (max < 1) return false;
+      const until = now + windowMs;
+      buckets.set(key, { count: 1, until });
+      expiresNext = Math.min(expiresNext, until);
       return true;
     },
   };

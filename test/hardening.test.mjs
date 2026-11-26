@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -96,6 +98,17 @@ test("window limiter and middleware return 429 per client and globally", () => {
   assert.equal(call("3.3.3.3"), 429, "global cap");
 });
 
+test("limiter refuses new callers at capacity and preserves active counters", () => {
+  const limiter = createWindowLimiter({ windowMs: 1000, max: 1, maxKeys: 2 });
+  assert.equal(limiter.take("first", 0), true);
+  assert.equal(limiter.take("second", 500), true);
+  assert.equal(limiter.take("overflow", 501), false);
+  assert.equal(limiter.take("first", 502), false);
+  assert.equal(limiter.take("third", 1000), true);
+  assert.equal(limiter.take("second", 1001), false);
+  assert.equal(limiter.take("fourth", 1002), false);
+});
+
 test("file lock waits without blocking the event loop", async (t) => {
   const target = tempStore(t);
   fs.writeFileSync(`${target}.lock`, "held");
@@ -109,6 +122,37 @@ test("file lock waits without blocking the event loop", async (t) => {
   assert.equal(fs.existsSync(`${target}.lock`), false);
   fs.writeFileSync(`${target}.lock`, "held");
   await assert.rejects(withFileLock(target, () => "never", { attempts: 3, delayMs: 1 }), /busy/);
+});
+
+test("stale cleanup requires a dead owner and release preserves replacements", async (t) => {
+  const file = tempStore(t);
+  const lock = `${file}.lock`;
+  const stale = () => fs.utimesSync(lock, new Date(0), new Date(0));
+  const options = { attempts: 3, delayMs: 1, staleMs: 10 };
+
+  await withFileLock(file, async () => {
+    stale();
+    await assert.rejects(withFileLock(file, () => assert.fail("live lock was reaped"), options), /busy/);
+    assert.ok(fs.existsSync(lock));
+  });
+
+  fs.writeFileSync(lock, "no verifiable owner");
+  stale();
+  await assert.rejects(withFileLock(file, () => assert.fail("unknown lock was reaped"), options), /busy/);
+  assert.equal(fs.readFileSync(lock, "utf8"), "no verifiable owner");
+
+  const child = spawnSync(process.execPath, ["-e", ""]);
+  assert.equal(child.status, 0);
+  fs.writeFileSync(lock, `${child.pid} ${randomUUID()}\n`);
+  stale();
+  await withFileLock(file, () => "recovered", options);
+  assert.equal(fs.existsSync(lock), false);
+
+  await withFileLock(file, async () => {
+    fs.renameSync(lock, `${lock}.old`);
+    fs.writeFileSync(lock, "replacement");
+  });
+  assert.equal(fs.readFileSync(lock, "utf8"), "replacement");
 });
 
 test("knowledge-asset prefix follows DKG_MCP_PUBLIC_URL", () => {

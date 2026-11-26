@@ -117,3 +117,25 @@ test("malformed backend pages fail closed rather than skipping subjects", () => 
   assert.throws(() => parsePushPage(response([{ s }]), {}), /Incomplete collective push metadata/);
   assert.equal(parsePushPage(response([{ s }]), response(details(s).map((r) => r.p === `${ns}publisher` ? { ...r, o: lit("stranger") } : r))).entries[0].verifiedOriginal, false);
 });
+
+test("self-hosted subject queries, metadata and cursors share the configured prefix", async () => {
+  const previous = process.env.DKG_MCP_PUBLIC_URL;
+  process.env.DKG_MCP_PUBLIC_URL = "https://swarm.example.test/service/";
+  try {
+    const selfHosted = await import("../collective-pushes.mjs?self-hosted");
+    const prefix = "https://swarm.example.test/service/ka/";
+    const subjects = Array.from({ length: 21 }, (_, n) => `${prefix}collective-push-x-${123456890 - n}`);
+    const now = Date.parse("2026-09-29T11:00:00Z");
+    assert.ok(selfHosted.pushSubjectQuery(undefined, now).includes(JSON.stringify(prefix)));
+    assert.match(selfHosted.pushMetadataQuery([subjects[0]]), /swarm\.example\.test\/service\/ka/);
+    assert.throws(() => selfHosted.pushMetadataQuery([subject("123456789")]), /Invalid collective push subjects/);
+    const first = selfHosted.parsePushPage(response(subjects.map((s) => ({ s }))),
+      response(subjects.slice(0, 20).flatMap((s) => details(s))), undefined, now);
+    assert.equal(first.entries[0].category, "watcher-namespace");
+    assert.ok(selfHosted.pushSubjectQuery(first.nextCursor, now).includes(subjects[19]));
+    assert.throws(() => pushSubjectQuery(first.nextCursor, now), /invalid collective push cursor/);
+  } finally {
+    if (previous === undefined) delete process.env.DKG_MCP_PUBLIC_URL;
+    else process.env.DKG_MCP_PUBLIC_URL = previous;
+  }
+});

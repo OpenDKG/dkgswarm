@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import { kaPrefix } from "../public-url.mjs";
+import { kaPrefix } from "./public-url.mjs";
 import { DatabaseSync } from "node:sqlite";
 
 // Same prefix as the MCP server (DKG_MCP_PUBLIC_URL) so self-hosted graphs index consistently.

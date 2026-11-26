@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseHTML } from "linkedom";
 import { ClientTransaction } from "x-client-transaction-id";
+import { kaPrefix } from "./public-url.mjs";
 
 const PUBLIC_BEARER = process.env.WATCH_X_PUBLIC_BEARER || "";
 const USER_QUERY = "G3KGOASz96M-Qu0nwmGXNg";
@@ -131,7 +132,7 @@ export function trustedPushEligible(post, at = Date.now()) {
 
 export function buildTrustedPush(post) {
   const id = String(post.post_id);
-  const subject = `https://www.dkgswarm.com/ka/collective-push-x-${id}`;
+  const subject = `${kaPrefix()}collective-push-x-${id}`;
   const target = `https://x.com/i/status/${id}`;
   const issuedAt = new Date(Date.parse(post.created_at)).toISOString();
   const expiresAt = new Date(Date.parse(post.created_at) + PUSH_WINDOW_MS).toISOString();
@@ -155,7 +156,7 @@ function assetIdentity(name) {
   const derived = /^x-insight-(\d+)$/.exec(name);
   if (derived) return { subject: `${NS}classification/${derived[1]}`, type: `${NS}Classification` };
   const push = /^collective-push-x-(\d+)$/.exec(name);
-  if (push) return { subject: `https://www.dkgswarm.com/ka/${name}`, type: `${CURATOR_NS}CollectivePush` };
+  if (push) return { subject: `${kaPrefix()}${name}`, type: `${CURATOR_NS}CollectivePush` };
   return null;
 }
 

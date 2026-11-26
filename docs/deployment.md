@@ -16,16 +16,16 @@ separate operation with its own review and authorization.
 | Repository path | Host path | Service |
 | --- | --- | --- |
 | root `*.mjs`, `package.json`, `package-lock.json` | `/root/dkg-public-mcp/` | `dkg-public-mcp.service` |
-| `collector/curator.mjs` | `/root/dkg-public-mcp/collector/curator.mjs` | used by the MCP process for curator helpers |
+| `collector/{curator,public-url}.mjs` | `/root/dkg-public-mcp/collector/` | used by the MCP process for curator and public URL helpers |
 | `collector/*` | `/root/dkg-swarm-webhooks/` | `dkg-swarm-webhooks.service` |
 | `scheduler/scheduled-curator.mjs` | `/root/trac-marketing-drafts/scheduled-curator.mjs` | `trac-marketing-curator.service` |
 | `scheduler/trac-marketing-curator.agent.md` | `/root/.config/opencode/agents/trac-marketing-curator.md` | read and hashed by the scheduler |
 | `site/*` | not part of this procedure | separate website release |
 | `docs/*`, `test/*`, `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES.md` | not deployed | source and review only |
 
-The extra `collector/curator.mjs` copy is required because the canonical MCP imports
-`./collector/curator.mjs`, while the host runs it from `/root/dkg-public-mcp`. Do not edit the
-import path in the deployed copy; copy the file instead.
+The MCP release includes `collector/curator.mjs` and `collector/public-url.mjs`. The
+collector’s own release installs both from the same source into its runtime root, where the
+curator and watcher import `./public-url.mjs`.
 
 Keep these private and out of Git and out of release copies: `.env`, `data/`, `node_modules/`,
 `policy-current.json`, `writer-codes.json`, OAuth stores, databases, logs, scheduler state and
@@ -70,7 +70,11 @@ DRAFTS=/root/trac-marketing-drafts
 AGENTS=/root/.config/opencode/agents
 install -d "$BACKUP/mcp/collector" "$BACKUP/collector" "$BACKUP/scheduler" "$BACKUP/agents"
 cp -a /root/dkg-public-mcp/*.mjs /root/dkg-public-mcp/package.json /root/dkg-public-mcp/package-lock.json "$BACKUP/mcp/"
-cp -a /root/dkg-public-mcp/collector/curator.mjs "$BACKUP/mcp/collector/" 2>/dev/null || true
+for f in curator.mjs public-url.mjs; do
+  if [ -f "/root/dkg-public-mcp/collector/$f" ]; then
+    cp -a "/root/dkg-public-mcp/collector/$f" "$BACKUP/mcp/collector/"
+  fi
+done
 cp -a /root/dkg-swarm-webhooks/*.mjs /root/dkg-swarm-webhooks/package.json /root/dkg-swarm-webhooks/package-lock.json "$BACKUP/collector/"
 cp -a "$DRAFTS/scheduled-curator.mjs" "$BACKUP/scheduler/" 2>/dev/null || true
 cp -a "$AGENTS/trac-marketing-curator.md" "$BACKUP/agents/" 2>/dev/null || true
@@ -89,13 +93,15 @@ DRAFTS=/root/trac-marketing-drafts
 AGENTS=/root/.config/opencode/agents
 
 for f in activity.mjs collective-pushes.mjs curator-intake.mjs issue-writer-code.mjs \
-         mcp-cors.mjs oauth.mjs oauth-provider.mjs policy-integrity.mjs \
-         posting-context.mjs publish-policy.mjs query-guard.mjs server.mjs \
+         file-lock.mjs mcp-cors.mjs oauth.mjs oauth-provider.mjs policy-integrity.mjs \
+         posting-context.mjs public-url.mjs publish-policy.mjs query-guard.mjs rate-limit.mjs server.mjs \
          social-worker-profile.mjs writer-invitations.mjs package.json package-lock.json; do
   install -m 0644 "$RELEASE/$f" "$MCP/$f"
 done
 install -d "$MCP/collector"
-install -m 0644 "$RELEASE/collector/curator.mjs" "$MCP/collector/curator.mjs"
+for f in curator.mjs public-url.mjs; do
+  install -m 0644 "$RELEASE/collector/$f" "$MCP/collector/$f"
+done
 
 rsync -a --checksum --exclude node_modules --exclude data --exclude .env \
   --exclude '*.log' "$RELEASE/collector/" "$COL/"
@@ -150,10 +156,12 @@ node "$RELEASE/scripts/check-imports.mjs" "$MCP"
 node "$RELEASE/scripts/check-imports.mjs" "$COL"
 node "$RELEASE/scripts/check-imports.mjs" "$DRAFTS"
 
-for f in server.mjs oauth.mjs oauth-provider.mjs mcp-cors.mjs; do
+for f in server.mjs oauth.mjs oauth-provider.mjs mcp-cors.mjs file-lock.mjs public-url.mjs rate-limit.mjs; do
   cmp "$RELEASE/$f" "$MCP/$f" || echo "DIFF $f"
 done
 cmp "$RELEASE/collector/curator.mjs" "$MCP/collector/curator.mjs"
+cmp "$RELEASE/collector/public-url.mjs" "$MCP/collector/public-url.mjs"
+cmp "$RELEASE/collector/public-url.mjs" "$COL/public-url.mjs"
 cmp "$RELEASE/scheduler/scheduled-curator.mjs" "$DRAFTS/scheduled-curator.mjs"
 
 curl -fsS http://127.0.0.1:27131/health
@@ -282,6 +290,14 @@ self-hosted graph is written and read under its own origin. Under an unprivilege
 account, point `TRAC_CURATOR_LOCK` at a writable lock path and set `TRAC_CURATOR_TRIGGER_FILE`:
 the MCP then touches that file (watched by `trac-marketing-curator.path`) instead of calling
 `systemctl start`, which `NoNewPrivileges=true` forbids.
+
+Set the same `DKG_MCP_PUBLIC_URL` in the MCP, collector, and scheduled-curator service
+environments on self-hosted installations. In-flight cursors are scoped to the configured
+prefix.
+
+Keep the writer-code registry on a local filesystem shared by processes on the same host.
+If a crash leaves an old-format lock without an owner, or leaves a `.lock.reap` file, stop
+all registry writers before removing the leftover lock files.
 
 Abuse limits: `/authorize` and `/api/swarm/memory` are rate limited per client IP and globally
 (429), `get_swarm_policy` shares the per-connection query budget, writer-code attempts are

@@ -8,7 +8,8 @@ const PREDICATES = [
   "https://schema.org/dateCreated", "https://schema.org/expires",
 ];
 const ACCOUNTS = new Set(["drevziga", "branaRakic", "umanitek", "origin_trail"].map((value) => value.toLowerCase()));
-const SUBJECT = /^https:\/\/www\.dkgswarm\.com\/ka\/(?:collective-push-x-\d{8,22}|curator-push-collective[-_]?push[-_][a-zA-Z0-9._-]{1,80})$/i;
+const SUBJECT_SUFFIX = "(collective-push-x-[0-9]{8,22}|curator-push-collective[-_]?push[-_][a-zA-Z0-9._-]{1,80})";
+const SUBJECT = new RegExp(`^${SUBJECT_SUFFIX}$`, "i");
 const PAGE_SIZE = 20;
 const METADATA_LIMIT = PAGE_SIZE * PREDICATES.length * 4;
 const XSD_DATETIME = "http://www.w3.org/2001/XMLSchema#dateTime";
@@ -28,7 +29,8 @@ function literal(value) {
 }
 
 function validSubject(subject) {
-  return typeof subject === "string" && SUBJECT.test(subject) && subject.length <= 160;
+  return typeof subject === "string" && subject.length <= 160 && subject.startsWith(BASE)
+    && !/[\u0000-\u0020<>"{}|^\x60\\]/u.test(subject) && SUBJECT.test(subject.slice(BASE.length));
 }
 
 function decodeCursor(cursor, now) {
@@ -55,7 +57,7 @@ export function pushBindings(response) {
 export function pushSubjectQuery(cursor, now = Date.now()) {
   const { asOf, after } = decodeCursor(cursor, now);
   const cutoff = new Date(asOf).toISOString();
-  return `SELECT DISTINCT ?s WHERE { ?s <${RDF_TYPE}> <${NS}CollectivePush> . ?s <https://schema.org/expires> ?expiry . FILTER(<${XSD_DATETIME}>(STR(?expiry)) > "${cutoff}"^^<${XSD_DATETIME}>) FILTER(REGEX(STR(?s), "^https://www[.]dkgswarm[.]com/ka/(collective-push-x-[0-9]{8,22}|curator-push-collective[-_]?push[-_][a-zA-Z0-9._-]{1,80})$", "i"))${after ? ` FILTER(STR(?s) < "${after}")` : ""} } ORDER BY DESC(?s) LIMIT ${PAGE_SIZE + 1}`;
+  return `SELECT DISTINCT ?s WHERE { ?s <${RDF_TYPE}> <${NS}CollectivePush> . ?s <https://schema.org/expires> ?expiry . FILTER(<${XSD_DATETIME}>(STR(?expiry)) > "${cutoff}"^^<${XSD_DATETIME}>) FILTER(STRSTARTS(STR(?s), ${JSON.stringify(BASE)}) && REGEX(SUBSTR(STR(?s), STRLEN(${JSON.stringify(BASE)}) + 1), ${JSON.stringify(`^${SUBJECT_SUFFIX}$`)}, "i"))${after ? ` FILTER(STR(?s) < ${JSON.stringify(after)})` : ""} } ORDER BY DESC(?s) LIMIT ${PAGE_SIZE + 1}`;
 }
 
 export function pushMetadataQuery(subjects) {

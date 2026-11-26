@@ -232,8 +232,12 @@ test("only non-empty SPARQL results confirm durable content", () => {
 
 test("first seed queues fresh verified trusted pushes without historical WM; restart prioritizes trusted delivery", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "x-watcher-trusted-"));
-  const keys = ["WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "DKG_API_TOKEN_FILE", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_AUTH_TOKEN", "WATCH_X_CT0", "WATCH_RETRY_MS"];
+  const keys = ["DKG_MCP_PUBLIC_URL", "WATCH_DB", "WATCH_SEEN", "WATCH_DETECTIONS", "DKG_API_TOKEN_FILE", "WATCH_SUPPORT_ACCOUNTS", "WATCH_X_AUTH_TOKEN", "WATCH_X_CT0", "WATCH_RETRY_MS"];
   const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  const selfHostedPrefix = "https://swarm.example.test/ka/";
+  const pushSubjects = new Set();
+  const pushQueries = [];
+  process.env.DKG_MCP_PUBLIC_URL = "https://swarm.example.test/";
   const originalFetch = globalThis.fetch;
   const dbPath = path.join(directory, "watcher.sqlite");
   process.env.WATCH_DB = dbPath;
@@ -272,7 +276,10 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
         ({ content: { itemContent: { tweet_results: { result: tweet } } } })) }] } } } } } });
     }
     if (url.endsWith("/api/knowledge-assets")) {
-      const name = JSON.parse(options.body).name;
+      const { name, quads } = JSON.parse(options.body);
+      if (name.startsWith("collective-push-x-")) {
+        for (const quad of quads) pushSubjects.add(quad.subject);
+      }
       requests.push(name);
       written.add(name);
       return json({ memoryLayer: "WM" });
@@ -291,6 +298,7 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
     }
     if (url.endsWith("/api/query")) {
       const body = JSON.parse(options.body);
+       if (body.sparql.includes("CollectivePush")) pushQueries.push(body.sparql);
        assert.doesNotMatch(body.sparql, /GRAPH\s*</);
        const id = body.sparql.match(/(?:classification\/|status\/)(\d+)|collective-push-x-(\d+)/)?.slice(1).find(Boolean);
        const name = body.sparql.includes("SocialMediaPosting") ? `raw-x-post-${id}`
@@ -335,6 +343,12 @@ test("first seed queues fresh verified trusted pushes without historical WM; res
     restarted.start();
     await waitFor(() => restarted.status().queue.some((row) => row.stage === "trusted-push-dkg" && row.status === "completed" && row.count === 2));
     assert.equal(requests[0], `collective-push-x-${currentId}`);
+    assert.deepEqual([...pushSubjects].sort(), [
+      `${selfHostedPrefix}collective-push-x-123456789012345678`,
+      `${selfHostedPrefix}collective-push-x-123456789012345679`,
+    ]);
+    assert.ok(pushQueries.length > 0);
+    assert.ok(pushQueries.every((query) => query.includes(selfHostedPrefix + "collective-push-x-")));
   } finally {
     globalThis.fetch = originalFetch;
     for (const [key, value] of Object.entries(previous)) {
