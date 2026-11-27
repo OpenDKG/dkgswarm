@@ -22,6 +22,11 @@ function freePort() {
 
 async function withServer(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "dkg-transport-hardening-"));
+  // Readiness fails closed without a trusted policy pin (#19); use the shipped example.
+  fs.copyFileSync(
+    new URL("../policy-current.example.json", import.meta.url),
+    path.join(dir, "policy-current.json"),
+  );
   const port = await freePort();
   const publicUrl = `http://127.0.0.1:${port}`;
   let logs = "";

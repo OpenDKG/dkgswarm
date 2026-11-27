@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { policyDigest, verifyPolicyBindings } from "../policy-integrity.mjs";
+import { PolicyPinError, POLICY_PIN_CODES, policyDigest, policyReadiness, readPolicyPin, verifyPolicyBindings } from "../policy-integrity.mjs";
 
 const current = JSON.parse(fs.readFileSync(new URL("../policy-current.example.json", import.meta.url), "utf8"));
 assert.ok(Number.isSafeInteger(current.version) && current.version >= 10);
@@ -307,4 +308,125 @@ test("publisher removes its temp pointer after a deterministic rename failure", 
     assert.deepEqual(fs.readFileSync(pointerPath), pointerBytes);
     assert.deepEqual(fs.readdirSync(dir).filter((name) => name.startsWith("policy-current.json.") && name.endsWith(".tmp")), []);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a missing or incomplete pin is a stable PolicyPinError, never a raw TypeError", () => {
+  assert.throws(
+    () => verifyPolicyBindings(bindings),
+    (error) => error instanceof PolicyPinError && error.code === POLICY_PIN_CODES.MISSING,
+  );
+  assert.throws(
+    () => verifyPolicyBindings(bindings, { version: current.version }),
+    (error) => error instanceof PolicyPinError && error.code === POLICY_PIN_CODES.INCOMPLETE,
+  );
+});
+
+test("readPolicyPin distinguishes missing, unreadable, malformed and incomplete pins", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-pin-"));
+  try {
+    const missing = path.join(dir, "missing.json");
+    assert.throws(() => readPolicyPin(missing), (error) => error.code === POLICY_PIN_CODES.MISSING);
+
+    const unreadable = path.join(dir, "unreadable.json");
+    assert.throws(
+      () => readPolicyPin(unreadable, () => { const error = new Error("denied"); error.code = "EACCES"; throw error; }),
+      (error) => error.code === POLICY_PIN_CODES.UNREADABLE,
+    );
+
+    const malformed = path.join(dir, "malformed.json");
+    fs.writeFileSync(malformed, "{not json");
+    assert.throws(() => readPolicyPin(malformed), (error) => error.code === POLICY_PIN_CODES.MALFORMED);
+
+    const incomplete = path.join(dir, "incomplete.json");
+    fs.writeFileSync(incomplete, JSON.stringify({ version: current.version }));
+    assert.throws(() => readPolicyPin(incomplete), (error) => error.code === POLICY_PIN_CODES.INCOMPLETE);
+
+    assert.equal(readPolicyPin(new URL("../policy-current.example.json", import.meta.url).pathname).version, current.version);
+    assert.deepEqual(policyReadiness(new URL("../policy-current.example.json", import.meta.url).pathname), {
+      ready: true,
+      version: current.version,
+    });
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("the publisher refuses an incomplete pin before writing the pointer", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-pin-publish-"));
+  try {
+    const pointerPath = path.join(dir, "policy-current.json");
+    const pointerBytes = Buffer.from(JSON.stringify({ version: current.version }) + "\n");
+    fs.writeFileSync(pointerPath, pointerBytes);
+    const result = spawnSync(process.execPath, [fileURLToPath(new URL("../publish-policy.mjs", import.meta.url)), fileURLToPath(new URL(`../policy-v${current.version}.json`, import.meta.url))], {
+      encoding: "utf8",
+      env: {
+        PATH: "/usr/local/bin:/usr/bin:/bin", HOME: dir, TMPDIR: dir,
+        DKG_MCP_POLICY_CURRENT: pointerPath, DKG_API_TOKEN: "test-only", DKG_API_URL: "http://127.0.0.1:1",
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /POLICY_PIN_INCOMPLETE/);
+    assert.doesNotMatch(result.stderr, /TypeError/);
+    assert.deepEqual(fs.readFileSync(pointerPath), pointerBytes);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("server readiness fails closed on a missing pin and recovers with a valid one, while liveness stays up", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "policy-ready-"));
+  const port = await new Promise((resolve) => {
+    const probe = net.createServer().listen(0, "127.0.0.1", () => {
+      const value = probe.address().port;
+      probe.close(() => resolve(value));
+    });
+  });
+  const base = `http://127.0.0.1:${port}`;
+  const pinPath = path.join(dir, "policy-current.json");
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../server.mjs", import.meta.url))], {
+    env: {
+      ...process.env,
+      HOME: dir,
+      DKG_MCP_HOST: "127.0.0.1",
+      DKG_MCP_PORT: String(port),
+      DKG_MCP_PUBLIC_URL: base,
+      DKG_PUBLIC_GRAPH_ID: "trac-marketing",
+      DKG_API_URL: "http://127.0.0.1:1",
+      DKG_API_TOKEN: "isolated-test-token",
+      DKG_MCP_OAUTH_STORE: path.join(dir, "oauth.json"),
+      DKG_MCP_WRITER_CODES: path.join(dir, "writer-codes.json"),
+      DKG_MCP_POLICY_CURRENT: pinPath,
+      DKG_MCP_ACTIVITY_STORE: path.join(dir, "activity.sqlite"),
+      TRAC_CURATOR_INTAKE: path.join(dir, "intake.sqlite"),
+      DKG_MCP_ALLOWED_HOSTS: "127.0.0.1,localhost",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(async () => {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (child.exitCode === null) child.kill("SIGKILL");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const waitFor = async (url, expected) => {
+    for (let i = 0; i < 100; i += 1) {
+      if (child.exitCode !== null) return null;
+      try {
+        const res = await fetch(url);
+        if (res.status === expected) return res;
+      } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return null;
+  };
+
+  const live = await waitFor(`${base}/livez`, 200);
+  assert.ok(live, "liveness stays up without a policy pin");
+
+  const unhealthy = await waitFor(`${base}/health`, 503);
+  assert.ok(unhealthy, "readiness fails closed without a policy pin");
+  assert.equal((await unhealthy.json()).policy.code, POLICY_PIN_CODES.MISSING);
+  assert.equal((await fetch(`${base}/readyz`)).status, 503);
+
+  fs.copyFileSync(new URL("../policy-current.example.json", import.meta.url), pinPath);
+  const healthy = await waitFor(`${base}/health`, 200);
+  assert.ok(healthy, "readiness recovers once a complete pin is present");
+  assert.equal((await healthy.json()).ready, true);
 });

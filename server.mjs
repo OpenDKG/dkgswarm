@@ -24,7 +24,7 @@ import { OAuthError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { routeDraft, retryCollectivePushes } from "./curator-intake.mjs";
 import { normalizeDraftName, isCollectivePush, validateCollectivePush } from "./collector/curator.mjs";
 import { createActivity, trackToolOutcome } from "./activity.mjs";
-import { verifyPolicyBindings } from "./policy-integrity.mjs";
+import { policyReadiness, readPolicyPin, verifyPolicyBindings } from "./policy-integrity.mjs";
 import { assertReadSparql } from "./query-guard.mjs";
 import { pushSubjectQuery, pushMetadataQuery, parsePushPage, pushBindings, collectivePushPageSize } from "./collective-pushes.mjs";
 import { postingContextSearchQuery, postingContextMetaQuery, rankPostingContext, sanitizeTopic } from "./posting-context.mjs";
@@ -57,6 +57,12 @@ const activity = createActivity();
 const POLICY_PREFIX = "swarm-policy-v";
 const POLICY_URI_PREFIX = `${PUBLIC_URL}/ka/${POLICY_PREFIX}`;
 const POLICY_CURRENT_PATH = process.env.DKG_MCP_POLICY_CURRENT || "/root/dkg-public-mcp/policy-current.json";
+const startupPolicyReadiness = policyReadiness(POLICY_CURRENT_PATH);
+if (!startupPolicyReadiness.ready) {
+  console.error(
+    `[startup] trusted policy pin not ready (${startupPolicyReadiness.code}): ${startupPolicyReadiness.message}`,
+  );
+}
 const queryBuckets = new Map();
 const draftTimes = new Map();
 let activeQueries = 0;
@@ -395,7 +401,7 @@ function getServer() {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ knownVersion }) => {
-      const current = JSON.parse(fs.readFileSync(POLICY_CURRENT_PATH, "utf8"));
+      const current = readPolicyPin(POLICY_CURRENT_PATH);
       // Always check graph bytes before accepting knownVersion. Cached clients must
       // not receive an unchanged response if graph policy was replaced.
       const sparql = `SELECT ?o WHERE { <${POLICY_URI_PREFIX}${current.version}> <http://www.w3.org/2000/01/rdf-schema#comment> ?o } LIMIT 2`;
@@ -676,7 +682,22 @@ app.all("/authorize", async (req, res) => {
 
 const resourceMetadataUrl = getOAuthProtectedResourceMetadataUrl(mcpUrl);
 
-app.get("/health", (_req, res) => {
+// Readiness: the trusted policy pin must be present and complete before the server
+// claims it can serve policy-dependent work. Liveness stays separate on /livez.
+function policyReadinessHandler(_req, res) {
+  const policy = policyReadiness(POLICY_CURRENT_PATH);
+  res.status(policy.ready ? 200 : 503).json({
+    ok: policy.ready,
+    ready: policy.ready,
+    policy,
+    graph: GRAPH_ID,
+    mcp: "/mcp",
+  });
+}
+
+app.get("/health", policyReadinessHandler);
+app.get("/readyz", policyReadinessHandler);
+app.get("/livez", (_req, res) => {
   res.json({ ok: true, graph: GRAPH_ID, mcp: "/mcp" });
 });
 
